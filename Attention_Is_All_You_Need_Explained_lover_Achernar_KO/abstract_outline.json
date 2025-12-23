@@ -1,0 +1,56 @@
+{
+  "sections": [
+    "서론",
+    "방법론",
+    "실험",
+    "결론"
+  ],
+  "key_concepts": [
+    "어텐션 메커니즘",
+    "트랜스포머 아키텍처",
+    "인코더-디코더 구조",
+    "시퀀스 변환 모델",
+    "병렬 처리"
+  ],
+  "formulas": [
+    "Attention(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V",
+    "\\theta^* = \\arg\\min_{\\theta} \\sum_{(x,y) \\in D} -\\log P(y|x; \\theta)",
+    "P(y | x; \\theta) = \\prod_{t=1}^{T_y} P(y_t | y_{<t}, x; \\theta)"
+  ],
+  "formula_meanings": {
+    "Attention(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V": "스케일드 닷-프로덕트 어텐션(Scaled Dot-Product Attention) 메커니즘. 쿼리(Q), 키(K), 밸류(V) 세 개의 벡터를 입력받아, 쿼리와 모든 키의 유사도를 계산하고 이를 정규화하여 가중치를 구한 뒤, 이 가중치를 밸류에 적용하여 최종 결과 벡터를 생성합니다.",
+    "\\theta^* = \\arg\\min_{\\theta} \\sum_{(x,y) \\in D} -\\log P(y|x; \\theta)": "모델의 최적화 목표 함수. 훈련 데이터셋(D) 전체에 대해 음의 로그 우도(Negative Log-Likelihood)를 최소화하는 모델 파라미터(θ*)를 찾는 과정을 나타냅니다. 이는 기계 번역과 같은 생성 모델의 표준적인 손실 함수입니다.",
+    "P(y | x; \\theta) = \\prod_{t=1}^{T_y} P(y_t | y_{<t}, x; \\theta)": "자기회귀(auto-regressive) 방식의 시퀀스 생성 확률. 입력 시퀀스 x와 이전에 생성된 출력 토큰들(y_{<t})을 조건으로, 다음 토큰(y_t)이 나타날 조건부 확률들의 곱으로 전체 출력 시퀀스 y의 확률을 계산합니다."
+  },
+  "formula_variables": {
+    "Attention(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V": "Q: 쿼리(Query) 행렬, K: 키(Key) 행렬, V: 밸류(Value) 행렬, d_k: 키 벡터의 차원, T: 전치(Transpose) 연산, softmax: 소프트맥스 함수",
+    "\\theta^* = \\arg\\min_{\\theta} \\sum_{(x,y) \\in D} -\\log P(y|x; \\theta)": "\\theta^*: 최적의 모델 파라미터 집합, \\theta: 모델 파라미터, D: 훈련 데이터셋, (x,y): 입력-출력 시퀀스 쌍, P(y|x; \\theta): 모델이 예측한 조건부 확률, log: 자연로그",
+    "P(y | x; \\theta) = \\prod_{t=1}^{T_y} P(y_t | y_{<t}, x; \\theta)": "P(y|x; \\theta): 입력 x가 주어졌을 때 출력 y가 나타날 확률, y_t: 시간 t에서의 출력 토큰, y_{<t}: 시간 t 이전까지의 모든 출력 토큰, x: 입력 시퀀스, T_y: 출력 시퀀스의 길이"
+  },
+  "formula_context": {
+    "Attention(Q, K, V) = \\text{softmax}\\left(\\frac{QK^T}{\\sqrt{d_k}}\\right)V": "이 논문에서 제안하는 '트랜스포머' 모델의 핵심 구성 요소입니다. 기존의 순환(recurrent) 및 컨볼루션(convolutional) 연산을 완전히 대체하여, 시퀀스 내의 단어 간 관계를 효과적으로 포착하고 계산 병렬성을 극대화하는 역할을 합니다.",
+    "\\theta^* = \\arg\\min_{\\theta} \\sum_{(x,y) \\in D} -\\log P(y|x; \\theta)": "트랜스포머 모델이 기계 번역 과제를 학습하는 과정을 수학적으로 정의합니다. 모델은 이 목적 함수를 최소화하기 위해 경사 하강법과 같은 최적화 알고리즘을 사용하여 파라미터를 업데이트합니다.",
+    "P(y | x; \\theta) = \\prod_{t=1}^{T_y} P(y_t | y_{<t}, x; \\theta)": "트랜스포머의 디코더가 번역 결과를 생성하는 방식을 나타냅니다. 한 번에 하나의 단어(토큰)를 순차적으로 예측하며, 이전에 생성된 단어들이 다음 단어 예측에 영향을 미칩니다. 이 과정은 모델의 근본적인 목표인 조건부 확률 모델링을 구체화합니다."
+  },
+  "mathematical_concepts": [
+    "어텐션 메커니즘",
+    "행렬 연산 (곱셈, 전치)",
+    "소프트맥스 함수",
+    "조건부 확률",
+    "최대 우도 추정 (Maximum Likelihood Estimation)",
+    "최적화 (최소화)",
+    "벡터 공간 및 유사도 측정"
+  ],
+  "paper_domain": "자연어 처리 (기계 번역)",
+  "mathematical_domains": [
+    "선형대수",
+    "확률 및 통계",
+    "최적화 이론",
+    "정보 이론"
+  ],
+  "contributions": [
+    "순환 및 컨볼루션 신경망을 완전히 배제하고 어텐션 메커니즘에만 의존하는 새로운 네트워크 아키텍처 '트랜스포머'를 제안했습니다.",
+    "모델의 구조적 특성을 통해 이전 모델들보다 월등히 높은 수준의 병렬 처리를 가능하게 하여 훈련 시간을 획기적으로 단축시켰습니다.",
+    "기계 번역 과제에서 기존의 최고 성능 모델들을 능가하는 새로운 SOTA(State-of-the-art) 성능을 달성하여 모델의 우수성을 입증했습니다."
+  ]
+}
