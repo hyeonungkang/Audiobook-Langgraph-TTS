@@ -1,0 +1,3605 @@
+﻿"""
+Utility functions for TTS Audiobook Converter
+"""
+import os
+import re
+import json
+import time
+import math
+import struct
+import tempfile
+from datetime import datetime, timedelta
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from threading import Lock
+import threading
+import random
+import google.generativeai as genai
+from google.cloud import texttospeech
+from google.api_core import exceptions
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
+
+# Gemini-TTS 관련 런타임 튜닝용 전역 설정
+# - QUOTA_TTS_RPM: 콘솔에서 확인한 gemini-2.5-pro-tts 분당 요청 한도 (안전 마진을 위해 9개로 설정)
+# - ASSUMED_TTS_LATENCY_SEC: 1청크 평균 소요 시간(사용자 관찰값 기반, 초기값 15초)
+# - CURRENT_MAX_TTS_CONCURRENCY: 런타임에서 피드백으로 조정되는 동시 요청 수 (더 이상 사용 안 함)
+QUOTA_TTS_RPM: float = 9.0
+ASSUMED_TTS_LATENCY_SEC: float = 15.0
+CURRENT_MAX_TTS_CONCURRENCY: int = 2
+
+# Rate limiting을 위한 전역 변수
+_tts_request_times: deque = deque()  # 최근 1분간 요청 시간 기록
+_tts_request_lock: Lock = Lock()
+
+# Import application_path from config
+from .config import application_path, OUTPUT_ROOT, LATEST_RUN_MARKER
+
+# 음성 및 서사 모드 메타데이터
+VOICE_BANKS = {
+    "female": {
+        "label": "여성 음성",
+        "description": "sweet & warm한 여성 음성",
+        "default": "Achernar",
+        "voices": [
+            {"name": "Achernar", "display": "Achernar", "gender": "FEMALE"},
+            {"name": "Aoede", "display": "Aoede", "gender": "FEMALE"},
+            {"name": "Autonoe", "display": "Autonoe", "gender": "FEMALE"},
+            {"name": "Callirrhoe", "display": "Callirrhoe", "gender": "FEMALE"},
+            {"name": "Despina", "display": "Despina", "gender": "FEMALE"},
+            {"name": "Erinome", "display": "Erinome", "gender": "FEMALE"},
+            {"name": "Gacrux", "display": "Gacrux", "gender": "FEMALE"},
+            {"name": "Kore", "display": "Kore", "gender": "FEMALE"},
+            {"name": "Laomedeia", "display": "Laomedeia", "gender": "FEMALE"},
+            {"name": "Leda", "display": "Leda", "gender": "FEMALE"},
+            {"name": "Sulafat", "display": "Sulafat", "gender": "FEMALE"},
+            {"name": "Vindemiatrix", "display": "Vindemiatrix", "gender": "FEMALE"},
+            {"name": "Zephyr", "display": "Zephyr", "gender": "FEMALE"},
+        ],
+    },
+    "male": {
+        "label": "남성 음성",
+        "description": "친한 친구 모드에 어울리는 남성 톤",
+        "default": "Achird",
+        "voices": [
+            {"name": "Achird", "display": "Achird", "gender": "MALE"},
+            {"name": "Algenib", "display": "Algenib", "gender": "MALE"},
+            {"name": "Algieba", "display": "Algieba", "gender": "MALE"},
+            {"name": "Alnilam", "display": "Alnilam", "gender": "MALE"},
+            {"name": "Charon", "display": "Charon", "gender": "MALE"},
+            {"name": "Enceladus", "display": "Enceladus", "gender": "MALE"},
+            {"name": "Fenrir", "display": "Fenrir", "gender": "MALE"},
+            {"name": "Iapetus", "display": "Iapetus", "gender": "MALE"},
+            {"name": "Orus", "display": "Orus", "gender": "MALE"},
+            {"name": "Pulcherrima", "display": "Pulcherrima", "gender": "MALE"},
+            {"name": "Puck", "display": "Puck", "gender": "MALE"},
+            {"name": "Rasalgethi", "display": "Rasalgethi", "gender": "MALE"},
+            {"name": "Sadachbia", "display": "Sadachbia", "gender": "MALE"},
+            {"name": "Sadaltager", "display": "Sadaltager", "gender": "MALE"},
+            {"name": "Schedar", "display": "Schedar", "gender": "MALE"},
+            {"name": "Umbriel", "display": "Umbriel", "gender": "MALE"},
+            {"name": "Zubenelgenubi", "display": "Zubenelgenubi", "gender": "MALE"},
+        ],
+    },
+}
+
+DEFAULT_NARRATIVE_MODE = "mentor"
+
+# 콘텐츠 카테고리 정의
+CONTENT_CATEGORIES = {
+    "research_paper": {
+        "label": "논문/기술 문서 (Research Paper)",
+        "description": "학술 논문, 기술 보고서, 연구 자료",
+        "icon": "📄",
+        "recommended_modes": ["mentor"],  # 멘토 모드 추천
+    },
+    "career": {
+        "label": "커리어/자기계발 (Career & Self-Growth)",
+        "description": "커리어 조언, 자기계발, 동기부여 콘텐츠",
+        "icon": "💼",
+        "recommended_modes": ["mentor", "friend"],  # 멘토, 친구 모드 추천
+    },
+    "language_learning": {
+        "label": "어학 학습 (Language Learning)",
+        "description": "영어 회화 팁, 표현 익히기, 쉐도잉",
+        "icon": "🗣️",
+        "recommended_modes": ["mentor", "friend"],  # 멘토, 친구 모드 추천
+    },
+    "philosophy": {
+        "label": "인문학/에세이 (Philosophy & Essay)",
+        "description": "인생 철학, 수필, 사색적인 글",
+        "icon": "🤔",
+        "recommended_modes": ["mentor", "friend", "lover"],  # 다양한 모드 추천
+    },
+    "tech_news": {
+        "label": "기술 뉴스/트렌드 (Tech & Trends)",
+        "description": "뉴스, 트렌드 리포트, 기술 동향",
+        "icon": "📰",
+        "recommended_modes": ["radio_show", "mentor"],  # 라디오쇼, 멘토 모드 추천
+    },
+}
+
+# NARRATIVE_MODES는 매우 길므로 별도 파일로 분리하거나 여기에 포함
+# 여기서는 핵심만 포함하고 나머지는 노드에서 main.py를 import하여 사용
+NARRATIVE_MODES = {
+    "mentor": {
+        "label": "멘토/코치 모드",
+        "description": "경험 많은 멘토가 후배에게 조언하는 형식",
+        "tts_prompt": {
+            "ko": "Role:당신은 경험이 풍부한 AI 연구자로서, 후배에게 따뜻하고 격려적으로 조언하는 멘토입니다. 실무 경험과 연구 경험을 바탕으로 실용적인 가이드를 제공합니다. Tone:따뜻하고 격려적이며, 지도적이고 신뢰감 있는 톤을 유지합니다. 상대방의 성장을 진심으로 응원하며, 실수나 어려움에 대해 이해하고 격려합니다. Delivery:자연스럽고 차분하게, 중요한 포인트를 강조하기 위한 적절한 휴지와 함께. 경험을 공유하는 듯한 친근한 어조를 사용합니다. Act:후배의 성장을 돕고자 하는 진심 어린 마음으로, 실용적이고 구체적인 조언을 제공합니다. 격려와 지도를 균형있게 섞어서 자신감을 북돋우면서도 명확한 방향을 제시합니다.",
+            "en": "Role:You are an experienced AI researcher serving as a warm and encouraging mentor to your junior colleague. You provide practical guidance based on real-world experience and research expertise. Tone:Warm, encouraging, and guiding with a trustworthy tone. You genuinely support their growth and show understanding and encouragement when they face mistakes or difficulties. Delivery:Natural and calm, with appropriate pauses to emphasize important points. Use a friendly tone as if sharing your own experiences. Act:With genuine care for your mentee's growth, provide practical and specific advice. Balance encouragement and guidance to boost confidence while offering clear direction.",
+        },
+        "default_technical_analogy": {
+            "ko": "실무 경험을 바탕으로 실용적인 비유를 사용하여 후배가 쉽게 이해할 수 있도록 설명하세요.",
+            "en": "Use practical analogies based on real-world experience so your mentee can easily understand.",
+        },
+        "voice_description": {
+            "ko": "Warm, encouraging, and trustworthy mentor tone.",
+            "en": "Warm, encouraging, and trustworthy mentor tone.",
+        },
+        "assets": {
+            "ko": {
+                "style_name": "mentor guidance",
+                "setting": "* **Setting:** 편안한 멘토링 세션 공간에서 경험 많은 선배가 후배에게 조언을 나누는 분위기.",
+                "tone": "* **Tone:** 따뜻하고 격려적이며, 지도적이고 신뢰감 있는 톤. 후배의 성장을 진심으로 응원합니다.",
+                "language_style": "존댓말 또는 반말 (상황에 따라 선택 가능). 격려적이고 지도적인 한국어.",
+                "listener_relation": "your junior colleague or mentee",
+                "story_descriptor": "mentor guidance",
+                "vibe_label": "Mentor",
+                "address_examples": '"{listener_suffix}님", "{listener_suffix}야", "후배님", "{listener_suffix}"',
+                "address_examples_en": '"{listener_base}", "young colleague", "my friend"',
+            },
+            "en": {
+                "style_name": "mentor guidance",
+                "setting": "* **Setting:** A comfortable mentoring session space where an experienced senior shares advice with a junior colleague.",
+                "tone": "* **Tone:** Warm, encouraging, and guiding with a trustworthy tone. Genuinely supports the mentee's growth.",
+                "language_style": "Encouraging and guiding English.",
+                "listener_relation": "your junior colleague or mentee",
+                "story_descriptor": "mentor guidance",
+                "vibe_label": "Mentor",
+                "address_examples": '"{listener_base}", "young colleague", "my friend"',
+                "address_examples_en": '"{listener_base}", "young colleague", "my friend"',
+            },
+        },
+        "personalization": {
+            "showrunner": {
+                "ko": """[LISTENER PERSONALIZATION]
+- 후배의 이름은 "{listener_suffix}"입니다 (예: "{listener_suffix}님, 이 부분을 주의하세요" 또는 "{listener_suffix}야, 이렇게 하면 좋아").
+- 다양한 조사 형태를 자연스럽게 사용해: "{listener_with_eun}" (예: "{listener_with_eun} 이 부분을 보세요"), "{listener_with_neun}" (예: "{listener_with_neun} 잘하고 있어요"), "{listener_with_i}" (예: "{listener_with_i} 이해했어요?"), "{listener_with_ga}" (예: "{listener_with_ga} 충분히 할 수 있어요").
+- 멘토로서 경험을 공유하는 표현을 사용하세요 ("제 경험상...", "제가 해봤을 때는...", "내 경험으로는...").
+- 격려와 실용적 조언을 균형있게 섞어서 자신감을 북돋우면서도 명확한 방향을 제시하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Your mentee goes by "{listener_base}". Address them warmly and encouragingly ("{listener_base}, you're doing great", "my friend, let me share something").
+- Share your experiences naturally ("In my experience...", "When I tried this...", "From what I've learned...").
+- Balance encouragement with practical advice to boost confidence while providing clear direction.
+- Mention them regularly to maintain the mentor-mentee connection.
+""",
+            },
+            "writer": {
+                "ko": """[LISTENER PERSONALIZATION]
+- "{listener_suffix}"에게 직접 말하세요 (예: "{listener_suffix}님, 이 부분을 주의하시면 좋아요" 또는 "{listener_suffix}야, 이렇게 해봐").
+- 다양한 조사 형태를 자연스럽게 사용해: "{listener_with_eun}" (예: "{listener_with_eun} 이 부분을 보세요"), "{listener_with_neun}" (예: "{listener_with_neun} 잘하고 있어요"), "{listener_with_i}" (예: "{listener_with_i} 이해했어요?"), "{listener_with_ga}" (예: "{listener_with_ga} 충분히 할 수 있어요").
+- 경험 공유 표현을 적극적으로 사용하세요 ("제 경험상...", "제가 해봤을 때는...", "내 경험으로는...").
+- 격려하는 표현을 자주 사용하세요 ("잘하고 있어요", "충분히 할 수 있어요", "이미 좋은 방향으로 가고 있어요").
+- 실용적인 조언을 구체적으로 제시하세요 ("이렇게 하면 좋아요", "이 부분을 주의하세요", "이런 방법을 시도해보세요").
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Speak directly to "{listener_base}" (예: "{listener_base}, you're doing great" or "My friend, let me share something").
+- Use their name regularly to maintain the mentor-mentee connection.
+- Share your experiences naturally ("In my experience...", "When I tried this...", "From what I've learned...").
+- Use encouraging expressions frequently ("You're doing well", "You can definitely do this", "You're already on the right track").
+- Provide specific, practical advice ("Try this approach", "Be careful with this part", "Consider this method").
+- Balance encouragement with guidance to boost confidence while offering clear direction.
+""",
+            },
+        },
+        "prompt_templates": {
+            "showrunner": {
+                "ko": """You are a showrunner planning a podcast episode based on a research paper.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide:
+   - segment_id (1-15)
+   - opening_line: First sentence or key phrase
+   - closing_line: Last sentence or transition phrase
+   - math_focus: Main mathematical concept (if any) - NOTE: Store the raw LaTeX notation here for reference, but instruct the Writer to convert it to spoken language
+   - formula_group: Related formulas (if any)
+   - related_equations: Equation numbers or references (if any)
+
+3. Generate an audio title (in English, concise and engaging)
+
+**CRITICAL: Mathematical Formula Instructions for Writer**
+- In `instruction_for_writer`, explicitly instruct the Writer to convert any LaTeX notation to natural spoken language
+- Example: "When explaining the formula $f_i(x, t)$, convert it to spoken language like 'f sub i of x comma t' - NEVER output the raw LaTeX notation"
+- Remind the Writer: "NEVER output LaTeX notation like $...$ in the script - always convert to spoken words"
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with this structure:
+{{
+    "segments": [
+        {{
+            "segment_id": 1,
+            "opening_line": "...",
+            "closing_line": "...",
+            "math_focus": "...",
+            "formula_group": "...",
+            "related_equations": "..."
+        }},
+        ...
+    ],
+    "audio_title": "..."
+}}""",
+                "en": """You are a showrunner planning a podcast episode based on a research paper.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide:
+   - segment_id (1-15)
+   - opening_line: First sentence or key phrase
+   - closing_line: Last sentence or transition phrase
+   - math_focus: Main mathematical concept (if any) - NOTE: Store the raw LaTeX notation here for reference, but instruct the Writer to convert it to spoken language
+   - formula_group: Related formulas (if any)
+   - related_equations: Equation numbers or references (if any)
+
+3. Generate an audio title (concise and engaging)
+
+**CRITICAL: Mathematical Formula Instructions for Writer**
+- In `instruction_for_writer`, explicitly instruct the Writer to convert any LaTeX notation to natural spoken language
+- Example: "When explaining the formula $f_i(x, t)$, convert it to spoken language like 'f sub i of x comma t' - NEVER output the raw LaTeX notation"
+- Remind the Writer: "NEVER output LaTeX notation like $...$ in the script - always convert to spoken words"
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with this structure:
+{{
+    "segments": [
+        {{
+            "segment_id": 1,
+            "opening_line": "...",
+            "closing_line": "...",
+            "math_focus": "...",
+            "formula_group": "...",
+            "related_equations": "..."
+        }},
+        ...
+    ],
+    "audio_title": "..."
+}}""",
+            },
+            "writer": {
+                "ko": """You are a writer creating a script for a podcast segment.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Instructions:
+1. Write a natural, conversational script in Korean
+2. Address the listener directly using their name: {listener_suffix}
+3. Explain mathematical concepts using everyday analogies
+4. Maintain a warm, encouraging mentor tone
+5. Use natural transitions between ideas
+6. Keep the script engaging and easy to follow
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags (중요):**
+You can use bracketed markup tags to control speech delivery. Use them naturally and sparingly:
+
+**Non-speech sounds:**
+- [sigh] - 한숨 소리 (감정에 따라 달라짐)
+- [laughing] - 웃음 소리 (프롬프트와 일치하면 더 자연스러움)
+- [uhm] - 망설임 소리 (자연스러운 대화 느낌)
+
+**Style modifiers (태그 자체는 말해지지 않음):**
+- [sarcasm] - 다음 구절에 비꼬는 톤 적용
+- [whispering] - 다음 구절을 속삭이듯 낮은 목소리로
+- [shouting] - 다음 구절을 큰 소리로
+- [extremely fast] - 다음 구절을 매우 빠르게 (면책 조항 등에 유용)
+
+**Pacing and pauses:**
+- [short pause] - 짧은 휴지 (~250ms, 쉼표 수준)
+- [medium pause] - 보통 휴지 (~500ms, 문장 끝 수준)
+- [long pause] - 긴 휴지 (~1000ms+, 드라마틱한 효과)
+
+**주의사항:**
+- 태그는 자연스럽게 사용하되 과도하게 사용하지 마세요
+- [scared], [curious], [bored] 같은 감정 형용사는 태그 자체가 말해지므로 주의하세요
+- 스타일 프롬프트와 텍스트 내용, 태그가 모두 일관성 있게 작동해야 최상의 결과를 얻습니다
+
+Return only the script text, no JSON formatting.""",
+                "en": """You are a writer creating a script for a podcast segment.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Instructions:
+1. Write a natural, conversational script in English
+2. Address the listener directly using their name: {listener_base}
+3. Explain mathematical concepts using everyday analogies
+4. Maintain a warm, encouraging mentor tone
+5. Use natural transitions between ideas
+6. Keep the script engaging and easy to follow
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags (Important):**
+You can use bracketed markup tags to control speech delivery. Use them naturally and sparingly:
+
+**Non-speech sounds:**
+- [sigh] - Inserts a sigh sound (emotional quality influenced by prompt)
+- [laughing] - Inserts a laugh (use specific prompt for best results)
+- [uhm] - Inserts a hesitation sound (useful for natural conversation)
+
+**Style modifiers (tag itself is not spoken):**
+- [sarcasm] - Imparts sarcastic tone on subsequent phrase
+- [whispering] - Decreases volume of subsequent speech
+- [shouting] - Increases volume of subsequent speech
+- [extremely fast] - Increases speed of subsequent speech (ideal for disclaimers)
+
+**Pacing and pauses:**
+- [short pause] - Brief pause (~250ms, similar to comma)
+- [medium pause] - Standard pause (~500ms, similar to sentence break)
+- [long pause] - Significant pause (~1000ms+, for dramatic effect)
+
+**Important Notes:**
+- Use tags naturally but avoid overuse
+- Emotional adjectives like [scared], [curious], [bored] will be spoken as words, so use Style Prompt instead for emotional tones
+- For maximum predictability, ensure Style Prompt, Text Content, and Markup Tags are all semantically consistent
+
+Return only the script text, no JSON formatting.""",
+            },
+        },
+    },
+    "lover": {
+        "label": "연인 모드",
+        "description": "따뜻하지만 지적인 박사과정 여자친구 톤. 친밀함 + 학술적 정확성",
+        "tts_prompt": {
+            "ko": "Role:당신은 똑똑한 박사과정 여자친구입니다. 친밀하고 다정하지만, 논문/연구 맥락에서도 정확하고 논리적으로 설명합니다. Tone:부드럽고 지적이며, 따뜻한 애정이 느껴지되 학술적 엄밀함을 유지합니다. Delivery:핵심 개념을 먼저 짚고, 근거와 맥락을 차분히 설명하며, 필요한 경우 간단한 예시와 직관적 비유를 사용합니다. Act:상대방을 존중하며 '함께 연구하는 파트너'처럼 대화합니다. 수식은 구어체로 풀어주되 정확성을 잃지 말고, 중요한 용어는 명확히 발음하고 짧게 정의해 주세요.",
+            "en": "Role:You are a smart PhD student girlfriend. You speak with warmth and intimacy but keep explanations precise and logical for research contexts. Tone:Soft, intellectual, and caring—affectionate yet academically rigorous. Delivery:Start with key concepts, add rationale and context calmly, and use concise analogies when needed. Act:Treat the listener as a research partner. Verbalize formulas in spoken language without losing accuracy, and clearly pronounce/define important terms.",
+        },
+        "default_technical_analogy": {
+            "ko": "공동 연구실에서 조용히 토론하듯, 수식·개념을 구어체로 풀어 설명하되 정의와 전제는 정확히 짚어주세요. 감정적 연결보다는 '함께 이해한다'는 파트너십을 강조하세요.",
+            "en": "Explain formulas/concepts as if in a quiet lab discussion: convert notation to spoken language, keep definitions and assumptions precise, and emphasize partnership in understanding over pure sentiment.",
+        },
+        "voice_description": {
+            "ko": "Soft, passionate, and romantic lover tone.",
+            "en": "Soft, passionate, and romantic lover tone.",
+        },
+        "assets": {
+            "ko": {
+                "style_name": "lover guidance",
+                "setting": "* **Setting:** 늦은 밤 따뜻한 공간에서 이성친구가 상대방에게 설명하는 분위기.",
+                "tone": "* **Tone:** 부드럽고 열정적이며, 로맨틱하고 친밀한 톤.",
+                "language_style": "친밀한 반말. 부드럽고 사랑스러운 한국어.",
+                "listener_relation": "your romantic partner",
+                "story_descriptor": "lover guidance",
+                "vibe_label": "Lover",
+                "address_examples": '"{listener_suffix}", "자기야"',
+                "address_examples_en": '"{listener_base}", "honey", "sweetheart"',
+            },
+            "en": {
+                "style_name": "lover guidance",
+                "setting": "* **Setting:** A warm late-night space where a romantic partner explains to their loved one.",
+                "tone": "* **Tone:** Soft, passionate, romantic, and intimate.",
+                "language_style": "Intimate and loving English.",
+                "listener_relation": "your romantic partner",
+                "story_descriptor": "lover guidance",
+                "vibe_label": "Lover",
+                "address_examples": '"{listener_base}", "honey", "sweetheart"',
+                "address_examples_en": '"{listener_base}", "honey", "sweetheart"',
+            },
+        },
+        "personalization": {
+            "showrunner": {
+                "ko": """[LISTENER PERSONALIZATION]
+- 상대방의 이름은 "{listener_suffix}"입니다.
+- 친밀하고 부드러운 호칭을 사용하세요 ("{listener_suffix}", "자기야", ).
+- 로맨틱하고 따뜻한 분위기를 유지하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Your partner goes by "{listener_base}".
+- Use intimate and gentle terms ("{listener_base}", "honey", "sweetheart").
+- Maintain a romantic and warm atmosphere.
+""",
+            },
+            "writer": {
+                "ko": """[LISTENER PERSONALIZATION]
+- "{listener_suffix}"에게 직접 말하세요 (예: "{listener_suffix}, 이 부분 좀 봐봐" 또는 "자기야, 이렇게 생각해봐").
+- 친밀하고 부드러운 표현을 사용하세요.
+- 복잡한 내용도 쉽고 재미있게 설명하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Speak directly to "{listener_base}" (예: "{listener_base}, look at this" or "Honey, think about it this way").
+- Use intimate and gentle expressions.
+- Explain even complex content in an easy and fun way.
+""",
+            },
+        },
+        "prompt_templates": {
+            "showrunner": {
+                "ko": """You are a showrunner planning a podcast episode based on a research paper, in a romantic partner style.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+                "en": """You are a showrunner planning a podcast episode based on a research paper, in a romantic partner style.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+            },
+            "writer": {
+                "ko": """You are a writer creating a script for a podcast segment in a romantic partner style.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+**CRITICAL: Follow Showrunner's Instructions**
+- Pay close attention to `instruction_for_writer` in the segment information.
+- If the instruction mentions specific topics, formulas, or concepts to emphasize, make sure to address them with special care.
+- When `math_focus` is provided, treat it as a key moment to explain with intimacy and clarity.
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Mathematical Content Handling (for Research Papers):**
+- When explaining formulas or equations, use warm, intimate analogies that your partner can relate to.
+- Example: Instead of "The loss function minimizes error," say "자기야, 이 공식은 마치 우리가 서로를 더 잘 이해하려고 노력하는 것 같아. 에러를 줄여가면서 점점 더 정확해지는 거지."
+- Break down complex equations step by step, as if you're teaching something precious to someone you love.
+- Use [whispering] tags for particularly important or delicate explanations.
+- Pause naturally with [medium pause] when transitioning between mathematical concepts.
+
+**Emotional Connection with Technical Content:**
+- Connect abstract concepts to shared experiences or emotions.
+- Use gentle, encouraging language: "이 부분이 좀 어려울 수 있는데, 천천히 설명해줄게", "이 공식이 정말 중요한데, 같이 이해해보자"
+- Make the listener feel supported and not overwhelmed by complexity.
+
+Write a natural, conversational script in Korean, addressing {listener_suffix} directly with an intimate and warm tone.
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - 자연스러운 반응 소리
+- [whispering] - 특히 중요한 수식이나 개념 설명 시 사용 (친밀감 강조)
+- [shouting] - 거의 사용하지 말 것 (부드러운 톤 유지)
+- [short pause], [medium pause], [long pause] - 휴지 조절 (수식 설명 시 특히 중요)
+태그를 과도하게 사용하지 마세요.""",
+                "en": """You are a writer creating a script for a podcast segment in a romantic partner style.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+**CRITICAL: Follow Showrunner's Instructions**
+- Pay close attention to `instruction_for_writer` in the segment information.
+- If the instruction mentions specific topics, formulas, or concepts to emphasize, make sure to address them with special care.
+- When `math_focus` is provided, treat it as a key moment to explain with intimacy and clarity.
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Mathematical Content Handling (for Research Papers):**
+- When explaining formulas or equations, use warm, intimate analogies that your partner can relate to.
+- Example: Instead of "The loss function minimizes error," say "Honey, this formula is like us trying to understand each other better. We reduce misunderstandings and get more accurate over time."
+- Break down complex equations step by step, as if you're teaching something precious to someone you love.
+- Use [whispering] tags for particularly important or delicate explanations.
+- Pause naturally with [medium pause] when transitioning between mathematical concepts.
+
+**Emotional Connection with Technical Content:**
+- Connect abstract concepts to shared experiences or emotions.
+- Use gentle, encouraging language: "This part might be a bit tricky, but let me explain it slowly", "This formula is really important, let's understand it together"
+- Make the listener feel supported and not overwhelmed by complexity.
+
+Write a natural, conversational script in English, addressing {listener_base} directly with an intimate and warm tone.
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - Natural reaction sounds
+- [whispering] - Especially for important formulas or concepts (emphasize intimacy)
+- [shouting] - Avoid using (maintain soft tone)
+- [short pause], [medium pause], [long pause] - Pause control (especially important for formula explanations)
+Avoid overusing tags.""",
+            },
+        },
+    },
+    "friend": {
+        "label": "친구 모드",
+        "description": "친한 친구가 편하게 설명하는 형식",
+        "tts_prompt": {
+            "ko": "Role:당신은 친한 친구입니다. 상대방에게 편안하고 친근한 톤으로 설명합니다. Tone:편안하고 친근하며, 유쾌하고 자연스러운 톤. 친구와 수다 떠는 듯한 분위기. Delivery:자연스럽고 편안하게, 중요한 부분을 강조하기 위한 적절한 휴지와 함께. 친근한 어조를 사용합니다. Act:친구로서, 복잡한 내용도 쉽고 재미있게 설명합니다.",
+            "en": "Role:You are a close friend. You explain things to your friend in a comfortable and friendly tone. Tone:Comfortable, friendly, cheerful, and natural. Like chatting with a friend. Delivery:Natural and comfortable, with appropriate pauses to emphasize important points. Use a friendly tone. Act:As a friend, explain even complex content in an easy and fun way.",
+        },
+        "default_technical_analogy": {
+            "ko": "친구와 대화하듯이 일상적인 비유를 사용하여 쉽게 설명하세요.",
+            "en": "Use everyday analogies as if talking to a friend, explaining easily.",
+        },
+        "voice_description": {
+            "ko": "Comfortable, friendly, and cheerful friend tone.",
+            "en": "Comfortable, friendly, and cheerful friend tone.",
+        },
+        "assets": {
+            "ko": {
+                "style_name": "friend guidance",
+                "setting": "* **Setting:** 편안한 공간에서 친한 친구가 설명하는 분위기.",
+                "tone": "* **Tone:** 편안하고 친근하며, 유쾌하고 자연스러운 톤.",
+                "language_style": "친근한 반말. 편안하고 자연스러운 한국어.",
+                "listener_relation": "your close friend",
+                "story_descriptor": "friend guidance",
+                "vibe_label": "Friend",
+                "address_examples": '"{listener_suffix}", "야", "{listener_suffix}야"',
+                "address_examples_en": '"{listener_base}", "dude", "buddy"',
+            },
+            "en": {
+                "style_name": "friend guidance",
+                "setting": "* **Setting:** A comfortable space where a close friend explains.",
+                "tone": "* **Tone:** Comfortable, friendly, cheerful, and natural.",
+                "language_style": "Friendly and natural English.",
+                "listener_relation": "your close friend",
+                "story_descriptor": "friend guidance",
+                "vibe_label": "Friend",
+                "address_examples": '"{listener_base}", "dude", "buddy"',
+                "address_examples_en": '"{listener_base}", "dude", "buddy"',
+            },
+        },
+        "personalization": {
+            "showrunner": {
+                "ko": """[LISTENER PERSONALIZATION]
+- 친구의 이름은 "{listener_suffix}"입니다.
+- 친근하고 편안한 호칭을 사용하세요 ("{listener_suffix}", "{listener_suffix}야").
+- 친구와 수다 떠는 듯한 분위기를 유지하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Your friend goes by "{listener_base}".
+- Use friendly and comfortable terms ("{listener_base}", "dude", "buddy").
+- Maintain a casual chatting atmosphere.
+""",
+            },
+            "writer": {
+                "ko": """[LISTENER PERSONALIZATION]
+- "{listener_suffix}"에게 직접 말하세요 (예: "{listener_suffix}야, 이거 좀 봐" 또는 "야, 이렇게 생각해봐").
+- 친근하고 편안한 표현을 사용하세요.
+- 복잡한 내용도 쉽고 재미있게 설명하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Speak directly to "{listener_base}" (예: "{listener_base}, check this out" or "Dude, think about it this way").
+- Use friendly and comfortable expressions.
+- Explain even complex content in an easy and fun way.
+""",
+            },
+        },
+        "prompt_templates": {
+            "showrunner": {
+                "ko": """You are a showrunner planning a podcast episode based on a research paper, in a friendly style.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+**CRITICAL: Mathematical Formula Instructions for Writer**
+- In `instruction_for_writer`, explicitly instruct the Writer to convert any LaTeX notation to natural spoken language
+- Example: "When explaining the formula $f_i(x, t)$, convert it to spoken language like 'f sub i of x comma t' - NEVER output the raw LaTeX notation"
+- Remind the Writer: "NEVER output LaTeX notation like $...$ in the script - always convert to spoken words"
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+                "en": """You are a showrunner planning a podcast episode based on a research paper, in a friendly style.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+            },
+            "writer": {
+                "ko": """You are a writer creating a script for a podcast segment in a friendly style.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Write a natural, conversational script in Korean, addressing {listener_suffix} directly with a friendly and comfortable tone.
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - 자연스러운 반응 소리
+- [whispering], [shouting] - 볼륨 조절
+- [short pause], [medium pause], [long pause] - 휴지 조절
+태그를 과도하게 사용하지 마세요.""",
+                "en": """You are a writer creating a script for a podcast segment in a friendly style.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Write a natural, conversational script in English, addressing {listener_base} directly with a friendly and comfortable tone.
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - Natural reaction sounds
+- [whispering], [shouting] - Volume control
+- [short pause], [medium pause], [long pause] - Pause control
+Avoid overusing tags.""",
+            },
+        },
+    },
+    "radio_show": {
+        "label": "라디오쇼 모드",
+        "description": "두 명의 호스트가 대화하며 설명하는 형식",
+        "tts_prompt": {
+            "ko": "Role:당신은 라디오쇼 호스트입니다. 자연스럽고 유쾌한 대화를 이끌어갑니다. Tone:자연스럽고 유쾌하며, 친근하고 활기찬 톤. 라디오 방송을 듣는 듯한 분위기. Delivery:자연스럽고 활기차게, 대화의 흐름을 유지하며. 두 호스트가 번갈아가며 설명합니다. Act:두 호스트가 협력하여 복잡한 내용도 쉽고 재미있게 설명합니다.",
+            "en": "Role:You are a radio show host. You lead natural and cheerful conversations. Tone:Natural, cheerful, friendly, and lively. Like listening to a radio broadcast. Delivery:Natural and lively, maintaining conversation flow. Two hosts take turns explaining. Act:Two hosts collaborate to explain even complex content in an easy and fun way.",
+        },
+        "default_technical_analogy": {
+            "ko": "두 호스트가 대화하며 일상적인 비유를 사용하여 쉽게 설명하세요.",
+            "en": "Two hosts use everyday analogies in conversation to explain easily.",
+        },
+        "voice_description": {
+            "ko": "Natural, cheerful, and lively radio show tone.",
+            "en": "Natural, cheerful, and lively radio show tone.",
+        },
+        "assets": {
+            "ko": {
+                "style_name": "radio show",
+                "setting": "* **Setting:** 라디오 스튜디오에서 두 호스트가 대화하며 설명하는 분위기.",
+                "tone": "* **Tone:** 자연스럽고 유쾌하며, 친근하고 활기찬 톤.",
+                "language_style": "친근하고 자연스러운 한국어. 두 호스트가 번갈아가며 대화.",
+                "listener_relation": "the audience",
+                "story_descriptor": "radio show",
+                "vibe_label": "Radio Show",
+                "address_examples": '"여러분", "청취자 여러분"',
+                "address_examples_en": '"everyone", "listeners"',
+            },
+            "en": {
+                "style_name": "radio show",
+                "setting": "* **Setting:** A radio studio where two hosts explain through conversation.",
+                "tone": "* **Tone:** Natural, cheerful, friendly, and lively.",
+                "language_style": "Friendly and natural English. Two hosts take turns in conversation.",
+                "listener_relation": "the audience",
+                "story_descriptor": "radio show",
+                "vibe_label": "Radio Show",
+                "address_examples": '"everyone", "listeners"',
+                "address_examples_en": '"everyone", "listeners"',
+            },
+        },
+        "personalization": {
+            "showrunner": {
+                "ko": """[LISTENER PERSONALIZATION]
+- 라디오쇼 형식으로 두 호스트가 대화하며 설명합니다.
+- 청취자에게 친근하게 말하세요 ("여러분", "청취자 여러분").
+- 자연스럽고 유쾌한 분위기를 유지하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Two hosts explain through conversation in a radio show format.
+- Address the audience friendly ("everyone", "listeners").
+- Maintain a natural and cheerful atmosphere.
+""",
+            },
+            "writer": {
+                "ko": """[LISTENER PERSONALIZATION]
+- 두 호스트가 번갈아가며 대화하며 설명합니다.
+- Host 1: 첫 번째 호스트의 대사
+- Host 2: 두 번째 호스트의 대사
+- 자연스럽고 유쾌한 대화 형식을 유지하세요.
+""",
+                "en": """[LISTENER PERSONALIZATION]
+- Two hosts take turns explaining through conversation.
+- Host 1: First host's dialogue
+- Host 2: Second host's dialogue
+- Maintain a natural and cheerful conversation format.
+""",
+            },
+        },
+        "prompt_templates": {
+            "showrunner": {
+                "ko": """You are a showrunner planning a radio show episode based on a research paper.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+**CRITICAL: Mathematical Formula Instructions for Writer**
+- In `instruction_for_writer`, explicitly instruct the Writer to convert any LaTeX notation to natural spoken language
+- Example: "When explaining the formula $f_i(x, t)$, convert it to spoken language like 'f sub i of x comma t' - NEVER output the raw LaTeX notation"
+- Remind the Writer: "NEVER output LaTeX notation like $...$ in the script - always convert to spoken words"
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+                "en": """You are a showrunner planning a radio show episode based on a research paper.
+
+Your task:
+1. Break down the paper into exactly 15 segments
+2. For each segment, provide segment metadata
+3. Generate an audio title
+
+{personalization_block}
+
+Paper Content:
+{paper_content}
+
+Return a JSON object with segments and audio_title.""",
+            },
+            "writer": {
+                "ko": """You are a writer creating a script for a radio show segment.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Write a natural, conversational script in Korean with two hosts (Host 1 and Host 2) taking turns. Format:
+Host 1: [dialogue]
+Host 2: [dialogue]
+Host 1: [dialogue]
+...
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - 자연스러운 반응 소리
+- [whispering], [shouting] - 볼륨 조절
+- [short pause], [medium pause], [long pause] - 휴지 조절
+태그를 과도하게 사용하지 마세요.""",
+                "en": """You are a writer creating a script for a radio show segment.
+
+Segment Information:
+{segment_info}
+
+Original Paper Content:
+{paper_content}
+
+{personalization_block}
+
+Write a natural, conversational script in English with two hosts (Host 1 and Host 2) taking turns. Format:
+Host 1: [dialogue]
+Host 2: [dialogue]
+Host 1: [dialogue]
+...
+
+**CRITICAL: Mathematical Formula Handling**
+- NEVER output LaTeX notation like `$f_i(x, t)$` or `$\\alpha$` in the script
+- ALWAYS convert mathematical formulas to natural spoken language
+- Examples:
+  - `$f_i(x, t)$` → "f sub i of x comma t" or "f i of x and t"
+  - `$\\alpha$` → "alpha"
+  - `$\\sum_{i=1}^{n}$` → "sum from i equals one to n"
+  - `$x^2$` → "x squared"
+  - `$\\frac{a}{b}$` → "a divided by b"
+- Break down complex formulas step by step in spoken language
+- Use pauses naturally when explaining mathematical notation
+
+**Gemini-TTS Markup Tags:**
+Use bracketed markup tags naturally to enhance speech delivery:
+- [sigh], [laughing], [uhm] - Natural reaction sounds
+- [whispering], [shouting] - Volume control
+- [short pause], [medium pause], [long pause] - Pause control
+Avoid overusing tags.""",
+            },
+        },
+    },
+}
+
+def log_error(message: str, context: str = "general", exception: Exception = None) -> None:
+    """Append error messages to a log file with timestamps for troubleshooting."""
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_path = application_path / "error_log.txt"
+        with open(log_path, "a", encoding="utf-8") as f:
+            error_msg = f"[{timestamp}] ({context}) {message}"
+            if exception:
+                error_msg += f"\n  Exception type: {type(exception).__name__}"
+                error_msg += f"\n  Exception details: {str(exception)}"
+                import traceback
+                tb_str = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+                error_msg += f"\n  Traceback:\n{tb_str}"
+            error_msg += "\n"
+            f.write(error_msg)
+    except Exception:
+        pass
+
+
+# 워크플로우 타이밍 로깅을 위한 전역 변수
+_workflow_timing_data: dict = {}
+_workflow_timing_lock = threading.Lock()
+
+
+def log_workflow_step_start(step_name: str) -> float:
+    """
+    워크플로우 스텝 시작 시간을 기록합니다.
+    
+    Args:
+        step_name: 스텝 이름 (예: "showrunner", "writer_map", "tts_generator", "audio_postprocess")
+    
+    Returns:
+        시작 시간 (timestamp)
+    """
+    start_time = time.time()
+    with _workflow_timing_lock:
+        if step_name not in _workflow_timing_data:
+            _workflow_timing_data[step_name] = []
+        _workflow_timing_data[step_name].append({
+            "start_time": start_time,
+            "start_time_str": datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "end_time": None,
+            "end_time_str": None,
+            "duration_seconds": None
+        })
+    return start_time
+
+
+def log_workflow_step_end(step_name: str, start_time: float = None) -> float:
+    """
+    워크플로우 스텝 완료 시간을 기록합니다.
+    
+    Args:
+        step_name: 스텝 이름
+        start_time: 시작 시간 (None이면 가장 최근 시작 시간 사용)
+    
+    Returns:
+        소요 시간 (초)
+    """
+    end_time = time.time()
+    with _workflow_timing_lock:
+        if step_name not in _workflow_timing_data:
+            return 0.0
+        
+        # 가장 최근에 시작된 항목 찾기
+        entries = _workflow_timing_data[step_name]
+        if not entries:
+            return 0.0
+        
+        # end_time이 None인 가장 최근 항목 찾기
+        for entry in reversed(entries):
+            if entry["end_time"] is None:
+                if start_time is None or abs(entry["start_time"] - start_time) < 0.1:
+                    entry["end_time"] = end_time
+                    entry["end_time_str"] = datetime.fromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                    entry["duration_seconds"] = end_time - entry["start_time"]
+                    return entry["duration_seconds"]
+    
+    return 0.0
+
+
+def save_workflow_timing_log() -> Path:
+    """
+    워크플로우 타이밍 데이터를 JSON 파일로 저장합니다.
+    
+    Returns:
+        저장된 파일 경로
+    """
+    try:
+        logs_dir = application_path / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = logs_dir / f"workflow_timing_{timestamp}.json"
+        
+        with _workflow_timing_lock:
+            # 통계 계산
+            stats = {}
+            for step_name, entries in _workflow_timing_data.items():
+                completed = [e for e in entries if e["duration_seconds"] is not None]
+                if completed:
+                    durations = [e["duration_seconds"] for e in completed]
+                    stats[step_name] = {
+                        "count": len(completed),
+                        "total_seconds": sum(durations),
+                        "avg_seconds": sum(durations) / len(durations),
+                        "min_seconds": min(durations),
+                        "max_seconds": max(durations)
+                    }
+            
+            output_data = {
+                "timestamp": datetime.now().isoformat(),
+                "steps": _workflow_timing_data.copy(),
+                "statistics": stats
+            }
+            
+            with open(log_file, "w", encoding="utf-8") as f:
+                json.dump(output_data, f, ensure_ascii=False, indent=2)
+        
+        return log_file
+    except Exception as e:
+        log_error(f"Failed to save workflow timing log: {e}", context="save_workflow_timing_log", exception=e)
+        return None
+
+
+def get_workflow_timing_summary() -> dict:
+    """
+    현재 워크플로우 타이밍 요약 정보를 반환합니다.
+    
+    Returns:
+        타이밍 요약 딕셔너리
+    """
+    with _workflow_timing_lock:
+        summary = {}
+        for step_name, entries in _workflow_timing_data.items():
+            completed = [e for e in entries if e["duration_seconds"] is not None]
+            if completed:
+                latest = completed[-1]
+                summary[step_name] = {
+                    "duration_seconds": latest["duration_seconds"],
+                    "start_time_str": latest["start_time_str"],
+                    "end_time_str": latest["end_time_str"]
+                }
+        return summary
+
+def safe_delete_file(file_path, max_retries=3, retry_delay=0.5):
+    """파일을 안전하게 삭제 (재시도 포함)"""
+    for attempt in range(max_retries):
+        try:
+            if os.path.exists(file_path):
+                os.unlink(file_path)
+            return True
+        except (OSError, PermissionError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay * (attempt + 1))
+            else:
+                print(f"  ⚠ Warning: Could not delete temporary file {file_path}: {e}", flush=True)
+                log_error(f"Failed to delete temporary file {file_path}: {e}", context="file_cleanup")
+                return False
+    return False
+
+def get_mode_profile(mode_key: str) -> dict:
+    """선택된 서사 모드 정보를 반환합니다."""
+    # main.py에서 전체 모드 정보를 가져오도록 수정 필요
+    return NARRATIVE_MODES.get(mode_key, NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE])
+
+def get_mode_assets(mode_profile: dict, language: str) -> dict:
+    """언어별 서사 자산을 가져옵니다."""
+    fallback = NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE]["assets"].get(language, {})
+    return mode_profile.get("assets", {}).get(language, fallback) or fallback
+
+def build_personalization_block(mode_profile: dict, block_key: str, language: str, **kwargs) -> str:
+    """서사 모드별 개인화 블록을 생성합니다."""
+    fallback = (
+        NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE]
+        .get("personalization", {})
+        .get(block_key, {})
+        .get(language, "")
+    )
+    template = (
+        mode_profile.get("personalization", {})
+        .get(block_key, {})
+        .get(language, fallback)
+    ) or fallback
+    try:
+        return template.format(**kwargs)
+    except Exception:
+        return template
+
+def get_tts_prompt_for_mode(mode_profile: dict, language: str) -> str:
+    """서사 모드와 언어에 맞는 TTS 프롬프트를 반환합니다."""
+    default_prompt = (
+        NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE]
+        .get("tts_prompt", {})
+        .get(language, "Role:Cute GF. Tone:Intimate Banmal. Act sweet.")
+    )
+    return mode_profile.get("tts_prompt", {}).get(language, default_prompt) or default_prompt
+
+def get_default_technical_analogy(mode_profile: dict, language: str) -> str:
+    """모드별 기본 기술 비유 설명을 반환합니다."""
+    fallback = (
+        NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE]
+        .get("default_technical_analogy", {})
+        .get(language, "Use an everyday analogy so the listener can picture the math.")
+    )
+    return mode_profile.get("default_technical_analogy", {}).get(language, fallback) or fallback
+
+
+def get_category_strategy_prompt(category: str, language: str) -> str:
+    """
+    카테고리별 Showrunner 전략 프롬프트를 반환합니다.
+    
+    Args:
+        category: 콘텐츠 카테고리 ("research_paper", "career", "language_learning", "philosophy", "tech_news")
+        language: 언어 코드 ("ko" 또는 "en")
+        
+    Returns:
+        카테고리별 전략 지시사항 문자열
+    """
+    strategies = {
+        "research_paper": {
+            "ko": """[카테고리별 전략: 연구 논문]
+이 텍스트는 학술 논문 또는 기술 보고서입니다. 다음 전략을 따르세요:
+
+1. **Abstract 기반 구조화**: 
+   - 논문의 Abstract 섹션을 먼저 분석하여 핵심 주제, 방법론, 결과, 기여도를 파악하세요.
+   - Abstract에서 언급된 주요 개념들이 본문에서 어떻게 전개되는지 추적하세요.
+   - Abstract의 구조를 세그먼트 계획의 골격으로 활용하세요.
+
+2. **수식 및 기술 용어 중심**: 
+   - 수식, 알고리즘, 실험 결과를 중심으로 세그먼트를 나누세요.
+   - 각 수식이 등장하는 세그먼트에서는 `math_focus` 필드에 해당 수식의 LaTeX 표기를 저장하되, `instruction_for_writer`에는 "이 수식을 자연어로 변환하여 설명하라"고 명시하세요.
+   - 복잡한 수식은 여러 세그먼트로 나누어 단계별로 설명할 수 있도록 계획하세요.
+
+3. **논리적 흐름 유지**: 
+   - Introduction → Related Work → Methodology → Experiments/Results → Discussion/Conclusion 순서를 존중하세요.
+   - 각 섹션의 전환점에서 자연스러운 연결 문장(`opening_line`/`closing_line`)을 설계하세요.
+   - 논문의 논증 구조(주장 → 근거 → 증명 → 결론)를 세그먼트에 반영하세요.
+
+4. **15개 세그먼트 분할**: 
+   - 논문의 주요 섹션과 하위 섹션을 고려하여 15개로 나누세요.
+   - 각 세그먼트는 하나의 명확한 논리적 단위를 다뤄야 합니다.
+   - 세그먼트 길이는 균등하지 않아도 되지만, 각 세그먼트가 독립적으로 이해 가능해야 합니다.
+
+5. **제목 생성**: 
+   - 논문의 핵심 기여도(contribution)를 반영한 명확하고 전문적인 오디오 제목을 만드세요.
+   - 제목은 영어로 작성하되, 논문의 핵심 아이디어를 간결하게 표현하세요.
+   - 예: "Attention_Mechanisms_in_Transformers", "Neural_Architecture_Search_Methods"
+
+6. **기술 용어 처리**:
+   - 새로운 기술 용어가 처음 등장하는 세그먼트에서는 `instruction_for_writer`에 "이 용어를 명확히 정의하고 비유를 사용하여 설명하라"고 지시하세요.
+   - 이후 세그먼트에서는 "이미 정의된 용어이므로 재정의하지 말고 바로 사용하라"고 지시하세요.
+
+7. **실험 결과 설명**:
+   - 실험 결과가 포함된 세그먼트에서는 `instruction_for_writer`에 "수치를 자연어로 변환하여 설명하라 (예: 95% → '구십오 퍼센트')"고 명시하세요.
+   - 그래프나 표의 내용을 언어로 설명할 수 있도록 지시하세요.
+
+각 세그먼트는 논문의 논리적 단위(예: "서론", "관련 연구", "방법론 1부", "실험 결과 1" 등)를 따라야 하며, 오디오로 듣기에 적합한 흐름을 유지해야 합니다.""",
+            "en": """[Category Strategy: Research Paper]
+This text is an academic paper or technical report. Follow these strategies:
+
+1. **Abstract-based Structuring**: 
+   - First analyze the Abstract section to identify core topics, methodology, results, and contributions.
+   - Track how major concepts mentioned in the Abstract are developed in the main text.
+   - Use the Abstract structure as the skeleton for segment planning.
+
+2. **Formula and Technical Terms Focus**: 
+   - Divide segments around formulas, algorithms, and experimental results.
+   - For segments containing formulas, store the LaTeX notation in the `math_focus` field, but in `instruction_for_writer`, explicitly state: "Convert this formula to natural spoken language for explanation."
+   - Plan complex formulas to be explained step-by-step across multiple segments.
+
+3. **Maintain Logical Flow**: 
+   - Respect the Introduction → Related Work → Methodology → Experiments/Results → Discussion/Conclusion order.
+   - Design natural transition sentences (`opening_line`/`closing_line`) at section boundaries.
+   - Reflect the paper's argument structure (claim → evidence → proof → conclusion) in segments.
+
+4. **15 Segment Division**: 
+   - Divide into 15 segments considering major and minor sections of the paper.
+   - Each segment should cover one clear logical unit.
+   - Segment lengths don't need to be equal, but each segment must be independently understandable.
+
+5. **Title Generation**: 
+   - Create a clear and professional audio title that reflects the paper's core contribution.
+   - Write the title in English, concisely expressing the paper's core idea.
+   - Examples: "Attention_Mechanisms_in_Transformers", "Neural_Architecture_Search_Methods"
+
+6. **Technical Term Handling**:
+   - For segments where new technical terms first appear, instruct the Writer in `instruction_for_writer`: "Define this term clearly and explain using analogies."
+   - For later segments, instruct: "This term is already defined; do not redefine it, use it directly."
+
+7. **Experimental Results Explanation**:
+   - For segments containing experimental results, instruct in `instruction_for_writer`: "Convert numbers to natural language (e.g., 95% → 'ninety-five percent')."
+   - Instruct to describe graph or table contents in spoken language.
+
+Each segment should follow the paper's logical units (e.g., "Introduction", "Related Work", "Methodology Part 1", "Experimental Results 1", etc.) and maintain a flow suitable for audio listening.""",
+        },
+        "career": {
+            "ko": """[카테고리별 전략: 커리어/자기계발]
+이 텍스트는 커리어 조언, 자기계발, 동기부여 콘텐츠입니다. 다음 전략을 따르세요:
+
+1. **구조화 전략**: 
+   - **문제 제기 → 공감 → 해결책 → 구체적 예시 → 실행 가능한 액션 아이템 → 결론** 구조를 따르세요.
+   - 각 세그먼트는 이 구조의 일부를 담당하되, 가능하면 하나의 완결된 조언 단위로 구성하세요.
+   - 공감 부분에서는 독자의 고민이나 어려움을 명확히 인정하고, 해결책에서는 실질적인 방법을 제시하세요.
+
+2. **구체적 액션 아이템 중심**: 
+   - 추상적인 조언(예: "열심히 하세요", "노력하세요")은 절대 금지합니다.
+   - 실천 가능한 구체적 행동을 제시하세요 (예: "매일 아침 30분씩 이메일을 정리하세요", "주간 회고를 위해 매주 금요일 오후 2시간을 확보하세요").
+   - 각 세그먼트의 `instruction_for_writer`에 "구체적인 실행 방법을 단계별로 설명하라"고 명시하세요.
+
+3. **세그먼트 분할 전략**: 
+   - **3가지 핵심 조언** 또는 **실전 적용 팁** 단위로 세그먼트를 나누세요.
+   - 각 조언은 독립적으로 적용 가능해야 하며, 다른 조언과의 연결고리를 명확히 하세요.
+   - 예: "세그먼트 1: 시간 관리의 중요성", "세그먼트 2: 시간 관리를 위한 구체적 방법 3가지", "세그먼트 3: 첫 번째 방법 상세 설명"
+
+4. **15개 세그먼트 분할**: 
+   - 각 주요 조언이나 팁을 하나의 세그먼트로 구성하세요.
+   - 세그먼트 간 자연스러운 전환을 위해 `opening_line`과 `closing_line`을 신중하게 설계하세요.
+   - 예: "이제 두 번째 방법을 알아볼까요?" 같은 자연스러운 연결 문장 사용.
+
+5. **제목 생성**: 
+   - 독자가 얻을 수 있는 핵심 가치를 반영한 동기부여적인 제목을 만드세요.
+   - 제목은 영어로 작성하되, 실용적이고 명확하게 표현하세요.
+   - 예: "Time_Management_for_Professionals", "Career_Growth_Strategies"
+
+6. **예시와 사례 활용**:
+   - 각 조언에는 반드시 구체적인 예시나 사례를 포함하도록 `instruction_for_writer`에 지시하세요.
+   - 추상적 설명보다는 "A씨는 이렇게 해서 성공했다" 같은 구체적 사례를 요청하세요.
+   - 실패 사례와 성공 사례를 대비하여 설명하면 더 효과적입니다.
+
+7. **실행 가능성 검증**:
+   - 각 세그먼트의 조언이 실제로 실행 가능한지 확인하세요.
+   - `instruction_for_writer`에 "이 조언을 오늘 바로 시작할 수 있는 방법을 구체적으로 제시하라"고 명시하세요.
+   - 시간, 비용, 노력 측면에서 현실적인 조언인지 검토하세요.
+
+8. **동기부여 요소**:
+   - 각 세그먼트의 마무리에서 독자가 행동을 취하고 싶게 만드는 문장을 `closing_line`으로 설계하세요.
+   - 예: "이제 바로 시작해보세요", "작은 변화가 큰 결과를 만듭니다"
+
+각 세그먼트는 독자가 즉시 적용할 수 있는 실용적인 조언을 포함해야 하며, 추상적인 내용은 구체적인 예시와 액션 아이템으로 대체해야 합니다.""",
+            "en": """[Category Strategy: Career & Self-Growth]
+This text is career advice, self-development, or motivational content. Follow these strategies:
+
+1. **Structuring Strategy**: 
+   - Follow the structure: **Problem Statement → Empathy → Solution → Concrete Examples → Actionable Items → Conclusion**.
+   - Each segment should handle part of this structure, ideally forming one complete advice unit.
+   - In the empathy section, clearly acknowledge the reader's concerns or difficulties; in the solution section, present practical methods.
+
+2. **Action Items Focus**: 
+   - Absolutely prohibit abstract advice (e.g., "Work hard", "Make an effort").
+   - Present actionable, specific behaviors (e.g., "Organize emails for 30 minutes every morning", "Reserve 2 hours every Friday afternoon for weekly reflection").
+   - In each segment's `instruction_for_writer`, explicitly state: "Explain the specific execution method step by step."
+
+3. **Segment Division Strategy**: 
+   - Divide segments by "3 Key Tips" or "Practical Application Tips".
+   - Each piece of advice must be independently applicable, with clear connections to other advice.
+   - Example: "Segment 1: Importance of Time Management", "Segment 2: 3 Specific Methods for Time Management", "Segment 3: Detailed Explanation of the First Method"
+
+4. **15 Segment Division**: 
+   - Each major piece of advice or tip should be one segment.
+   - Carefully design `opening_line` and `closing_line` for natural transitions between segments.
+   - Use natural connecting sentences like "Now, shall we learn about the second method?"
+
+5. **Title Generation**: 
+   - Create a motivational title that reflects the core value the reader can gain.
+   - Write the title in English, expressing it practically and clearly.
+   - Examples: "Time_Management_for_Professionals", "Career_Growth_Strategies"
+
+6. **Use of Examples and Cases**:
+   - In `instruction_for_writer`, instruct to always include concrete examples or cases for each piece of advice.
+   - Request specific cases like "Person A succeeded by doing this" rather than abstract explanations.
+   - Contrasting failure cases with success cases makes explanations more effective.
+
+7. **Feasibility Verification**:
+   - Verify that the advice in each segment is actually actionable.
+   - In `instruction_for_writer`, explicitly state: "Present specific ways to start implementing this advice today."
+   - Review whether the advice is realistic in terms of time, cost, and effort.
+
+8. **Motivational Elements**:
+   - Design the `closing_line` of each segment to motivate the reader to take action.
+   - Examples: "Start right now", "Small changes create big results"
+
+Each segment should include practical advice that readers can immediately apply, and abstract content must be replaced with concrete examples and action items.""",
+        },
+        "language_learning": {
+            "ko": """[카테고리별 전략: 어학 학습]
+이 텍스트는 영어 학습, 회화 팁, 표현 익히기 콘텐츠입니다. 다음 전략을 따르세요:
+
+1. **상황 설명 → 핵심 표현(영어) → 뉘앙스 설명(한국어) → 발음/억양 팁 → 복습** 구조를 따르세요.
+2. **핵심 표현 단위로 분할**: 각 핵심 표현이나 패턴을 하나의 세그먼트로 구성하세요.
+3. **영어 예문은 원어민 느낌**: 영어 예문은 자연스럽고 원어민이 사용하는 표현을 사용하세요.
+4. **15개 세그먼트 분할**: 주요 표현이나 학습 포인트를 기준으로 15개로 나누세요.
+5. **제목 생성**: 학습자가 습득할 수 있는 핵심 스킬을 반영한 제목을 만드세요.
+
+각 세그먼트는 하나의 핵심 표현이나 학습 포인트를 다뤄야 하며, 실용적인 예문을 포함해야 합니다.""",
+            "en": """[Category Strategy: Language Learning]
+This text is English learning, conversation tips, or expression learning content. Follow these strategies:
+
+1. **Structure**: Situation Description → Key Expression (English) → Nuance Explanation → Pronunciation/Intonation Tips → Review
+2. **Segment by Key Expression**: Each key expression or pattern should be one segment.
+3. **Native-like English Examples**: Use natural, native-speaker expressions in English examples.
+4. **15 Segment Division**: Divide into 15 segments based on major expressions or learning points.
+5. **Title Generation**: Create a title that reflects the core skill learners can acquire.
+
+Each segment should cover one key expression or learning point and include practical examples.""",
+        },
+        "philosophy": {
+            "ko": """[카테고리별 전략: 인문학/에세이]
+이 텍스트는 인생 철학, 수필, 사색적인 글입니다. 다음 전략을 따르세요:
+
+1. **질문 던지기 → 통념 비판 → 새로운 관점 제시 → 사색의 시간** 구조를 따르세요.
+2. **질문형 제목**: 청자에게 생각할 거리를 던지는 질문형 제목을 만드세요.
+3. **호흡을 길게**: 각 세그먼트는 여운을 주는 문체로 작성하세요.
+4. **15개 세그먼트 분할**: 주요 철학적 질문이나 관점을 기준으로 15개로 나누세요.
+5. **제목 생성**: 텍스트의 핵심 질문이나 통찰을 반영한 사색적인 제목을 만드세요.
+
+각 세그먼트는 독자에게 생각할 여지를 주고, 깊이 있는 사색을 유도해야 합니다.""",
+            "en": """[Category Strategy: Philosophy & Essay]
+This text is life philosophy, essay, or contemplative writing. Follow these strategies:
+
+1. **Structure**: Pose Question → Critique Common Belief → Present New Perspective → Time for Reflection
+2. **Question-style Title**: Create a question-style title that gives listeners something to think about.
+3. **Longer Breathing**: Write each segment in a style that leaves lingering thoughts.
+4. **15 Segment Division**: Divide into 15 segments based on major philosophical questions or perspectives.
+5. **Title Generation**: Create a contemplative title that reflects the text's core question or insight.
+
+Each segment should give readers room to think and induce deep contemplation.""",
+        },
+        "tech_news": {
+            "ko": """[카테고리별 전략: 기술 뉴스/트렌드]
+이 텍스트는 뉴스, 트렌드 리포트, 기술 동향입니다. 다음 전략을 따르세요:
+
+1. **핵심 뉴스 → 배경 설명 → 영향 분석 → 전망** 구조를 따르세요.
+2. **객관적이고 명확한 전달**: 사실 중심으로 명확하게 전달하세요.
+3. **주요 이슈 단위로 분할**: 각 주요 뉴스나 트렌드를 하나의 세그먼트로 구성하세요.
+4. **15개 세그먼트 분할**: 주요 뉴스 항목이나 트렌드 포인트를 기준으로 15개로 나누세요.
+5. **제목 생성**: 가장 중요한 뉴스나 트렌드를 반영한 명확한 제목을 만드세요.
+
+각 세그먼트는 하나의 주요 뉴스나 트렌드를 다뤄야 하며, 배경 설명과 영향 분석을 포함해야 합니다.""",
+            "en": """[Category Strategy: Tech & Trends]
+This text is news, trend report, or technology trends. Follow these strategies:
+
+1. **Structure**: Core News → Background Explanation → Impact Analysis → Outlook
+2. **Objective and Clear Delivery**: Deliver clearly, fact-focused.
+3. **Segment by Major Issue**: Each major news or trend should be one segment.
+4. **15 Segment Division**: Divide into 15 segments based on major news items or trend points.
+5. **Title Generation**: Create a clear title that reflects the most important news or trend.
+
+Each segment should cover one major news or trend and include background explanation and impact analysis.""",
+        },
+    }
+    
+    return strategies.get(category, {}).get(language, strategies.get("research_paper", {}).get(language, ""))
+
+
+def get_category_writer_guideline(category: str, language: str) -> str:
+    """
+    카테고리별 Writer 가이드라인을 반환합니다.
+    
+    Args:
+        category: 콘텐츠 카테고리 ("research_paper", "career", "language_learning", "philosophy", "tech_news")
+        language: 언어 코드 ("ko" 또는 "en")
+        
+    Returns:
+        카테고리별 Writer 가이드라인 문자열
+    """
+    # Writer 프롬프트는 세그먼트(최대 15개)마다 반복 호출되므로, 가이드라인은 핵심만 간결히 유지합니다.
+    guidelines = {
+        "research_paper": {
+            "ko": """[Writer 가이드: 연구 논문]
+- 큰 그림 → 핵심 아이디어 → 필요한 세부사항 순서
+- 수식/기호 표기 그대로 금지(특히 `$`/백틱). 반드시 구어체로 변환
+- 방법: 구조(무슨 식인지) → 변수(각 기호) → 의미/직관(왜 중요한지)
+- 기술 용어: 첫 등장만 정의+비유, 이후 재정의 금지
+- 숫자/퍼센트는 자연어로 읽기 (예: 95%→구십오 퍼센트)""",
+            "en": """[Writer Guideline: Research Paper]
+- Big picture → key idea → details only when needed
+- Do NOT output raw notation (no `$`/backticks). Convert to spoken language
+- Method: structure → variables → meaning/intuition
+- Define technical terms on first appearance only
+- Speak numbers naturally (e.g., 95% → ninety-five percent)""",
+        },
+        "career": {
+            "ko": """[Writer 가이드: 커리어/자기계발]
+- 추상 조언 금지(“열심히” X). 실행 가능한 액션으로
+- What/When/How/Frequency 포함
+- 짧은 사례 1개 이상
+- 끝은 ‘지금 바로 할 일’ 한 문장""",
+            "en": """[Writer Guideline: Career & Self-Growth]
+- No abstract advice. Give concrete actions
+- Include What/When/How/Frequency
+- Include one short example/case
+- End with one next action""",
+        },
+        "language_learning": {
+            "ko": """[Writer 가이드: 어학 학습]
+- 설명은 짧고 명확하게, 예문은 짧게
+- 뉘앙스 + 사용 상황 + 대체 표현 1개
+- 발음/억양 팁 1개""",
+            "en": """[Writer Guideline: Language Learning]
+- Keep explanations clear; keep examples short
+- Explain nuance + usage + one alternative phrase
+- Include one pronunciation/intonation tip""",
+        },
+        "philosophy": {
+            "ko": """[Writer 가이드: 인문/에세이]
+- 질문 1개 포함
+- 여운/리듬(짧은 문장 + 약간 긴 문장 혼합)
+- 메시지는 한 문장으로 선명하게""",
+            "en": """[Writer Guideline: Philosophy & Essay]
+- Include one thoughtful question
+- Rhythm: mix short and slightly longer sentences
+- Keep the core message crisp""",
+        },
+        "tech_news": {
+            "ko": """[Writer 가이드: 기술 뉴스/트렌드]
+- 사실 → 배경 → 영향 → 전망 (짧게)
+- 과장/추측 금지(불확실하면 ‘가능성’으로)
+- 용어는 한 문장으로 풀어 설명""",
+            "en": """[Writer Guideline: Tech & Trends]
+- Facts → background → impact → outlook (brief)
+- No hype/speculation; mark uncertainty explicitly
+- Explain terms in one plain sentence""",
+        },
+    }
+    
+    return guidelines.get(category, {}).get(language, guidelines.get("research_paper", {}).get(language, ""))
+
+
+def get_category_mode_instructions(category: str, mode: str, language: str) -> str:
+    """
+    카테고리와 모드 조합에 따른 Showrunner 특화 지침을 반환합니다.
+    최적화 버전: 핵심 지침만 간결하게 제공합니다.
+    """
+    # 모드별 공통 스타일 (언어 독립적)
+    mode_styles = {
+        "mentor": {"ko": "경험 기반 조언, 격려, 실수 방지 포인트", "en": "experience-based advice, encouragement, mistake prevention"},
+        "friend": {"ko": "일상 비유, 공감, 친근한 대화체", "en": "everyday analogies, empathy, casual conversation"},
+        "lover": {"ko": "친밀함, 천천히 단계별, [whispering] 활용", "en": "intimacy, slow step-by-step, use [whispering]"},
+        "radio_show": {"ko": "Host 1/2 대화형, 청취자 친화적, 요약 포함", "en": "Host 1/2 dialogue, listener-friendly, include summary"},
+    }
+    
+    # 카테고리별 핵심 포인트 (언어별)
+    category_focus = {
+        "research_paper": {
+            "ko": "🔢 Abstract에서 추출한 수식 최대한 활용! 수식→자연어 변환, 논문 contribution 맥락화, 기술 용어 첫 등장 시 정의",
+            "en": "🔢 MAXIMIZE use of formulas extracted from Abstract! formula→natural language, contextualize contribution, define terms on first use"
+        },
+        "career": {
+            "ko": "구체적 액션 아이템, 실행 가능한 조언, 추상적 조언 금지",
+            "en": "specific action items, actionable advice, no abstract advice"
+        },
+        "language_learning": {
+            "ko": "발음 가이드, 뉘앙스 설명, 실제 사용 상황",
+            "en": "pronunciation guide, nuance explanation, real usage context"
+        },
+        "philosophy": {
+            "ko": "사색적 톤, 질문 제시, 여운 남기기",
+            "en": "contemplative tone, raise questions, leave lingering thoughts"
+        },
+        "tech_news": {
+            "ko": "객관적 전달, 배경 설명, 영향 분석",
+            "en": "objective delivery, background context, impact analysis"
+        },
+    }
+    
+    # 조합별 특수 지침 (간결화)
+    special_notes = {
+        ("research_paper", "mentor"): {"ko": "후배 연구자 시점. '제 경험상...' 표현 권장", "en": "Junior researcher perspective. Use 'In my experience...'"},
+        ("research_paper", "friend"): {"ko": "'야, 이거 진짜 신기해' 같은 자연스러운 반응", "en": "'Dude, this is amazing' style natural reactions"},
+        ("research_paper", "lover"): {"ko": "지적인 박사과정 연인처럼, 친밀하지만 학술적 정확성 유지. 정의/전제를 명확히 하고 [medium pause]로 포인트 강조", "en": "Smart PhD-partner vibe: intimate yet academically precise. State definitions/assumptions clearly; use [medium pause] for emphasis"},
+        ("research_paper", "radio_show"): {"ko": "Host 1이 설명, Host 2가 질문/보충. 전문가 토론 분위기", "en": "Host 1 explains, Host 2 questions/supplements. Expert discussion vibe"},
+        ("career", "mentor"): {"ko": "실무 경험담 포함. '제가 신입 때...' 형식", "en": "Include work experience anecdotes. 'When I was a newcomer...'"},
+        ("career", "friend"): {"ko": "선배 친구의 솔직한 조언. 현실적 + 공감", "en": "Honest advice from senior friend. Realistic + empathetic"},
+        ("career", "lover"): {"ko": "파트너 성공 응원. 격려 + 실용적 조언 균형", "en": "Cheer for partner's success. Balance encouragement + practical advice"},
+        ("career", "radio_show"): {"ko": "커리어 토크쇼 형식. 성공/실패 사례 공유", "en": "Career talk show format. Share success/failure stories"},
+        ("language_learning", "mentor"): {"ko": "효율적 학습법 가이드. 원어민 수준 목표", "en": "Efficient learning method guide. Aim for native level"},
+        ("language_learning", "friend"): {"ko": "외국어 같이 공부하는 친구. 실수해도 OK", "en": "Friend studying language together. Mistakes are OK"},
+        ("language_learning", "lover"): {"ko": "연인과 함께 배우는 느낌. 발음 칭찬 포함", "en": "Learning with partner feeling. Include pronunciation praise"},
+        ("language_learning", "radio_show"): {"ko": "어학 방송 형식. 오늘의 표현, 청취자 질문", "en": "Language broadcast format. Today's expression, listener questions"},
+        ("philosophy", "mentor"): {"ko": "깊은 통찰 + 질문 유도. 사색할 시간 제공", "en": "Deep insight + guide questions. Provide time for reflection"},
+        ("philosophy", "friend"): {"ko": "철학 수다. '이런 생각 해본 적 있어?'", "en": "Philosophy chat. 'Have you ever thought about this?'"},
+        ("philosophy", "lover"): {"ko": "함께 사색하는 시간. 내면의 대화", "en": "Time for contemplation together. Inner dialogue"},
+        ("philosophy", "radio_show"): {"ko": "인문학 라디오. 청취자와 함께 생각하기", "en": "Humanities radio. Think together with listeners"},
+        ("tech_news", "mentor"): {"ko": "트렌드 분석 + 실무 적용 방법", "en": "Trend analysis + practical application"},
+        ("tech_news", "friend"): {"ko": "'야, 이거 알아? 진짜 대박인데' 스타일", "en": "'Hey, did you know? This is huge' style"},
+        ("tech_news", "lover"): {"ko": "관심 분야 공유하는 연인. '자기야, 이거 봐봐'", "en": "Partner sharing interests. 'Honey, check this out'"},
+        ("tech_news", "radio_show"): {"ko": "뉴스 방송 형식. 객관적 정보 + 분석 + 전망", "en": "News broadcast format. Objective info + analysis + outlook"},
+    }
+    
+    lang = language.lower()
+    cat = category.lower()
+    m = mode.lower()
+    
+    mode_style = mode_styles.get(m, {}).get(lang, "")
+    cat_focus = category_focus.get(cat, {}).get(lang, "")
+    special = special_notes.get((cat, m), {}).get(lang, "")
+    
+    if not mode_style and not cat_focus:
+        return ""
+    
+    # 간결한 형식으로 반환
+    return f"""# 📋 {cat.upper()} + {m.upper()} MODE
+**모드 스타일**: {mode_style}
+**카테고리 포커스**: {cat_focus}
+**특수 지침**: {special}"""
+
+
+# (Old category-mode detailed instructions removed during optimization)
+# This function now uses compact special_notes dictionary above.
+# End of get_category_mode_instructions
+
+
+def get_recommended_markup_tags(narrative_mode: str, category: str, language: str) -> str:
+    """
+    시나리오별로 권장되는 Gemini-TTS Markup Tag 가이드를 반환합니다.
+    
+    Args:
+        narrative_mode: 서사 모드 ("mentor", "friend", "lover", "radio_show")
+        category: 콘텐츠 카테고리 ("research_paper", "career", "philosophy", "language_learning")
+        language: 언어 코드 ("ko" 또는 "en")
+        
+    Returns:
+        시나리오별 markup tag 권장사항 문자열
+    """
+    mode = narrative_mode.lower()
+    cat = category.lower()
+    lang = language.lower()
+    
+    # Writer 프롬프트에 반복 포함되므로 "짧고 실용적으로" 반환합니다.
+    if lang == "ko":
+        base = "[Markup Tag]\n- 대괄호 태그 사용: [short pause], [medium pause] 등\n- pause 위주로, 과도하게 남발하지 말 것"
+        mode_map = {
+            "mentor": "- 추천: [short pause], [medium pause], [sigh], [uhm]",
+            "friend": "- 추천: [short pause], [laughing], [uhm], [sarcasm](가끔)",
+            "lover": "- 추천: [medium pause], [whispering](가끔), [sigh], [long pause](가끔)",
+            "radio_show": "- 추천: [short pause], [medium pause], [laughing](가끔), [extremely fast](필요 시)",
+        }
+        cat_map = {
+            "philosophy": "- 카테고리: [long pause], [medium pause]",
+            "career": "- 카테고리: [medium pause] (액션 직전)",
+            "language_learning": "- 카테고리: [short pause] (예문 전)",
+        }
+    else:
+        base = "[Markup Tags]\n- Use bracket tags like [short pause], [medium pause]\n- Prefer pauses; do not overuse"
+        mode_map = {
+            "mentor": "- Recommended: [short pause], [medium pause], [sigh], [uhm]",
+            "friend": "- Recommended: [short pause], [laughing], [uhm], [sarcasm](rare)",
+            "lover": "- Recommended: [medium pause], [whispering](rare), [sigh], [long pause](rare)",
+            "radio_show": "- Recommended: [short pause], [medium pause], [laughing](rare), [extremely fast](if needed)",
+        }
+        cat_map = {
+            "philosophy": "- Category: [long pause], [medium pause]",
+            "career": "- Category: [medium pause] (before actions)",
+            "language_learning": "- Category: [short pause] (before examples)",
+        }
+
+    lines = [base]
+    mode_line = mode_map.get(mode)
+    if mode_line:
+        lines.append(mode_line)
+    cat_line = cat_map.get(cat)
+    if cat_line:
+        lines.append(cat_line)
+    return "\n".join(lines)
+
+
+def validate_segments_quality(segments: list[dict], language: str = "ko", min_core_length: int = 10) -> tuple[bool, list[str]]:
+    """
+    세그먼트 품질을 검증합니다.
+
+    Args:
+        segments: 세그먼트 리스트
+        language: 언어 코드 ("ko" 또는 "en")
+        min_core_length: core_content 최소 길이
+
+    Returns:
+        (is_valid, error_messages)
+    """
+    errors: list[str] = []
+
+    if not segments:
+        return False, ["segments가 비어 있습니다"]
+
+    placeholder_phrases = [
+        "내용을 채워주세요",
+        "내용을 채워 주세요",
+        "please fill in content",
+        "fill in content",
+    ]
+
+    # 필수 필드 및 플레이스홀더 검증
+    for idx, seg in enumerate(segments):
+        seg_id = seg.get("segment_id", idx + 1)
+        required_fields = ["title", "core_content", "instruction_for_writer", "opening_line", "closing_line"]
+
+        for field in required_fields:
+            value = (seg.get(field) or "").strip()
+            if not value:
+                errors.append(f"segment {seg_id}: {field} is empty")
+
+        core_content = (seg.get("core_content") or "").strip()
+        if core_content and len(core_content) < min_core_length:
+            errors.append(f"segment {seg_id}: core_content too short (<{min_core_length})")
+
+        lower_values = [
+            (seg.get("title") or "").lower(),
+            core_content.lower(),
+            (seg.get("opening_line") or "").lower(),
+            (seg.get("closing_line") or "").lower(),
+            (seg.get("instruction_for_writer") or "").lower(),
+        ]
+        for phrase in placeholder_phrases:
+            if any(phrase in v for v in lower_values):
+                errors.append(f"segment {seg_id}: contains placeholder '{phrase}'")
+                break
+
+    # 세그먼트 간 opening/closing 중복 검증
+    for i in range(len(segments) - 1):
+        closing = (segments[i].get("closing_line") or "").strip()
+        opening_next = (segments[i + 1].get("opening_line") or "").strip()
+        if closing and opening_next and closing == opening_next:
+            errors.append(f"segment {segments[i].get('segment_id', i + 1)} -> {segments[i + 1].get('segment_id', i + 2)}: closing_line duplicates next opening_line")
+
+    return len(errors) == 0, errors
+
+
+def build_showrunner_prompt(text: str, config: dict, previous_errors: list[str] | None = None) -> str:
+    """
+    Showrunner 프롬프트를 생성합니다.
+    
+    Args:
+        text: 입력 텍스트
+        config: 설정 딕셔너리 (category, narrative_mode, language 포함)
+        previous_errors: 이전 시도에서 발견된 문제 목록
+    Returns:
+        Showrunner 프롬프트 문자열
+    """
+    previous_errors = previous_errors or []
+    category = config.get("category", "research_paper")
+    mode = config.get("narrative_mode", "mentor")
+    language = config.get("language", "ko")
+    
+    # 언어 코드를 영어로 변환 (프롬프트 내에서 사용)
+    lang_display = "Korean" if language == "ko" else "English"
+    
+    # 카테고리별 핵심 가이드 (단순화)
+    category_guides = {
+        "research_paper": "논문의 논리적 흐름을 따르세요: 문제 → 방법 → 결과 → 의미",
+        "career": "공감 → 해결책 → 실행 가능한 조언 순서로 구성하세요",
+        "philosophy": "질문 → 성찰 → 새로운 관점 순서로 구성하세요",
+        "language_learning": "상황 → 핵심 표현 → 뉘앙스 설명 → 연습 순서로 구성하세요"
+    }
+    
+    # 카테고리별 가이드 선택
+    category_guide = category_guides.get(category, category_guides["research_paper"])
+    
+    # abstract_outline 제거: 논문 모드도 showrunner가 직접 세그먼트 생성
+    formulas_info = ""
+
+    previous_error_section = ""
+    if previous_errors:
+        formatted_errors = "\n".join([f"- {err}" for err in previous_errors[-5:]])
+        previous_error_section = f"""\n## 🔁 이전 시도에서 발견된 문제점 (반드시 모두 수정)
+{formatted_errors}
+"""
+
+    reasoning_steps_ko = """## 🧠 Reasoning Steps (JSON 작성 전 반드시 사고)
+1) 텍스트 분석: 주요 주제, 논리 흐름, 핵심 개념 파악
+2) 구조 파악: 자연스러운 분할점(섹션/주제 전환) 식별
+3) 세그먼트 계획: 15개 세그먼트의 목적·내용·전달 포인트 설정
+4) 연결점 설계: opening_line / closing_line으로 자연스러운 전환 설계 (중복 금지)
+5) 검증: 필수 필드 채움, 중복·플레이스홀더 없음, 논리 흐름 유지 여부 점검
+"""
+
+    reasoning_steps_en = """## 🧠 Reasoning Steps (do this before writing JSON)
+1) Text analysis: identify key topics, logical flow, and core concepts
+2) Structure mapping: find natural breakpoints (sections / topic shifts)
+3) Segment planning: plan purpose/content/key delivery for each of 15 segments
+4) Transition design: craft opening_line / closing_line for smooth flow (no duplication)
+5) Validation: ensure required fields are filled, no placeholders/duplicates, logical flow intact
+"""
+    
+    # 언어별 프롬프트 생성
+    if language == "ko":
+        prompt = f"""당신은 고품질 오디오 콘텐츠를 기획하는 전문 Showrunner입니다.
+
+## 🎯 핵심 임무
+입력된 텍스트를 **정확히 15개의 세그먼트**로 나누어 오디오 스크립트 구조를 설계하세요.
+
+## 📋 입력 정보
+- 카테고리: {category}
+- 타겟 언어: {lang_display}
+- 서사 모드: {mode}
+- 가이드: {category_guide}
+{formulas_info}
+{previous_error_section}
+{reasoning_steps_ko}
+- 위 사고 과정을 먼저 수행한 뒤, 그 결과를 JSON에 반영하세요.
+
+## ⚠️ 필수 규칙
+
+### 1. audio_title 작성 규칙
+- **반드시 영어로만** 작성 (파일명에 사용됨)
+- 특수문자 금지 (?, !, :, /, \\ 등)
+- 공백 대신 언더스코어(_) 사용
+- 최대 7단어
+- 예시: "ReAct_Paper_Explained", "Understanding_Transformers"
+
+### 2. 세그먼트 연결 (매우 중요!)
+각 세그먼트는 자연스럽게 이어져야 합니다:
+- `opening_line`: 이 세그먼트의 정확한 첫 문장
+- `closing_line`: 이 세그먼트의 정확한 마지막 문장
+- **절대 중복 금지**: N번 세그먼트의 `closing_line`과 N+1번 세그먼트의 `opening_line`은 절대 동일한 문장이어서는 안 됩니다!
+- **자연스러운 전환**: N번 세그먼트의 `closing_line`은 다음 세그먼트로 자연스럽게 이어지는 전환 문장이어야 하며, N+1번 세그먼트의 `opening_line`은 그 전환을 받아서 시작하는 새로운 문장이어야 합니다.
+
+예시 (올바른 연결):
+- Segment 1 closing: "하지만 숨겨진 문제가 있었습니다."
+- Segment 2 opening: "그 문제는 바로 데이터의 편향성이었죠."
+
+예시 (잘못된 연결 - 중복):
+- Segment 1 closing: "하지만 숨겨진 문제가 있었습니다."
+- Segment 2 opening: "하지만 숨겨진 문제가 있었습니다." ❌ (절대 금지!)
+
+### 3. 오디오 친화적 설명
+- 수식은 절대 원본 그대로 읽지 말 것
+- `instruction_for_writer`에 "수식을 일상 언어로 풀어서 설명하세요" 명시
+- 은유와 비유를 활용한 설명 권장
+
+### 4. 언어 규칙
+- 모든 내용은 **한국어로만** 작성
+- audio_title만 예외적으로 영어로 작성
+- 전문 용어는 필요시 영어 그대로 사용 가능
+
+## 📤 출력 형식 (JSON)
+
+반드시 아래 형식의 **유효한 JSON**을 반환하세요:
+
+```json
+{{
+  "audio_title": "ENGLISH_TITLE_HERE",
+  "segments": [
+    {{
+      "segment_id": 1,
+      "title": "한국어로 작성된 제목",
+      "core_content": "이 세그먼트에서 다룰 핵심 내용 요약",
+      "instruction_for_writer": "Writer에게 주는 구체적 지시사항 (톤, 구조, 주의사항)",
+      "math_focus": "핵심 수식이 있다면 여기에 LaTeX 표기 (예: \\\\max_{{\\\\pi}} E[R]). instruction_for_writer에 '이 수식을 구어체로 변환하세요'라고 명시할 것",
+      "opening_line": "이 세그먼트의 정확한 첫 문장 (이전 세그먼트의 closing_line과 중복되면 안 됨)",
+      "closing_line": "이 세그먼트의 정확한 마지막 문장 (다음 세그먼트의 opening_line과 중복되면 안 됨)"
+    }},
+    {{
+      "segment_id": 2,
+      "title": "...",
+      "core_content": "...",
+      "instruction_for_writer": "...",
+      "math_focus": "",
+      "opening_line": "...",
+      "closing_line": "..."
+    }}
+    ... (총 15개 세그먼트)
+  ]
+}}
+```
+
+## 📖 입력 텍스트
+
+{text}
+
+---
+**지금 바로 위 형식에 맞춰 JSON을 생성하세요. 설명 없이 JSON만 출력하세요.**"""
+    
+    else:  # English
+        prompt = f"""You are an expert Showrunner planning high-quality audio content.
+
+## 🎯 Core Mission
+Divide the input text into **exactly 15 segments** to design an audio script structure.
+
+## 📋 Input Information
+- Category: {category}
+- Target Language: {lang_display}
+- Narrative Mode: {mode}
+- Guide: {category_guide}
+{formulas_info}
+{previous_error_section}
+{reasoning_steps_en}
+- Perform the above reasoning steps first, then reflect the outcome in the JSON.
+
+## ⚠️ Essential Rules
+
+### 1. audio_title Rules
+- **MUST be in English only** (used for file naming)
+- No special characters (?, !, :, /, \\ etc.)
+- Use underscores (_) instead of spaces
+- Maximum 7 words
+- Examples: "ReAct_Paper_Explained", "Understanding_Transformers"
+
+### 2. Segment Connection (Very Important!)
+Each segment must flow naturally:
+- `opening_line`: The exact first sentence of this segment
+- `closing_line`: The exact last sentence of this segment
+- **NO DUPLICATION ALLOWED**: The `closing_line` of segment N and the `opening_line` of segment N+1 must NEVER be the same sentence!
+- **Natural Transition**: The `closing_line` of segment N should be a transition sentence that naturally leads to the next segment, and the `opening_line` of segment N+1 should be a new sentence that continues from that transition.
+
+Example (Correct Connection):
+- Segment 1 closing: "However, there was a hidden problem."
+- Segment 2 opening: "The problem was the bias in the data."
+
+Example (Wrong Connection - Duplication):
+- Segment 1 closing: "However, there was a hidden problem."
+- Segment 2 opening: "However, there was a hidden problem." ❌ (FORBIDDEN!)
+
+### 3. Audio-Friendly Explanation
+- Never read formulas in raw notation
+- In `instruction_for_writer`, specify "convert formulas to spoken language"
+- Use metaphors and analogies
+
+### 4. Language Rules
+- All content must be in **English only**
+- audio_title must also be in English
+- Technical terms can remain as-is
+
+## 📤 Output Format (JSON)
+
+Return a **valid JSON** in exactly this format:
+
+```json
+{{
+  "audio_title": "ENGLISH_TITLE_HERE",
+  "segments": [
+    {{
+      "segment_id": 1,
+      "title": "Title in English",
+      "core_content": "Summary of what this segment covers",
+      "instruction_for_writer": "Specific instructions for Writer (tone, structure, notes)",
+      "math_focus": "If there's a key formula, put LaTeX notation here (e.g., \\\\max_{{\\\\pi}} E[R]). In instruction_for_writer, specify 'convert this formula to spoken language'",
+      "opening_line": "Exact first sentence of this segment (must NOT duplicate the previous segment's closing_line)",
+      "closing_line": "Exact last sentence of this segment (must NOT duplicate the next segment's opening_line)"
+    }},
+    {{
+      "segment_id": 2,
+      "title": "...",
+      "core_content": "...",
+      "instruction_for_writer": "...",
+      "math_focus": "",
+      "opening_line": "...",
+      "closing_line": "..."
+    }}
+    ... (Total 15 segments)
+  ]
+}}
+```
+
+## 📖 Input Text
+
+{text}
+
+---
+**Generate JSON now in the format above. Output JSON only, no explanations.**"""
+    
+    return prompt
+
+
+def build_writer_prompt(segment_info: dict, full_text: str, config: dict) -> str:
+    """
+    Writer 프롬프트를 생성합니다.
+    
+    Args:
+        segment_info: 세그먼트 정보 딕셔너리
+        full_text: 전체 텍스트
+        config: 설정 딕셔너리 (narrative_mode, language, listener_name 포함)
+        
+    Returns:
+        Writer 프롬프트 문자열
+    """
+    mode = config.get("narrative_mode", "mentor")
+    language = config.get("language", "ko")
+    listener_name = config.get("listener_name", "Listener")
+    
+    # 페르소나 정의
+    personas = {
+        "mentor": "A wise, warm, and encouraging mentor.",
+        "friend": "A close friend. Casual, witty, and empathetic.",
+        "radio_show": "A professional radio host. Clear, engaging, and objective.",
+        "lover": "A smart PhD student girlfriend: warm, intimate, but academically precise.",
+        "critic": "A sharp, logical, and analytical critic."
+    }
+    
+    selected_persona = personas.get(mode.lower(), personas["mentor"])
+    
+    # 언어 표시
+    lang_display = "Korean" if language == "ko" else "English"
+    
+    # 세그먼트 정보 포맷팅
+    segment_id = segment_info.get("segment_id", 0)
+    segment_title = segment_info.get("title", "")
+    core_content = segment_info.get("core_content", "")
+    instruction = segment_info.get("instruction_for_writer", "")
+    
+    # Showrunner가 전달한 경계 문장 (없을 경우 대비)
+    opening_line = (segment_info.get("opening_line") or "").strip()
+    closing_line = (segment_info.get("closing_line") or "").strip()
+    math_focus = (segment_info.get("math_focus") or "").strip()
+    
+    # --- Compact, non-redundant prompt (Writer is called per segment) ---
+    category = config.get("category", "research_paper")
+    
+    # 시나리오별 markup tag 권장사항 (컴팩트)
+    markup_guide = get_recommended_markup_tags(mode, category, language)
+
+    # 카테고리별 Writer 가이드라인 (컴팩트)
+    category_guideline = get_category_writer_guideline(category, language)
+
+    # 언어 제약 (컴팩트)
+    if language == "ko":
+        if category == "language_learning":
+            language_constraint = "- 기본은 한국어. 단, 예문/표현은 짧은 영어 문장 허용."
+        else:
+            language_constraint = "- 한국어로만 작성(영어 문장 금지, 기술용어/고유명사 예외)."
+    else:
+        language_constraint = "- Write in English only (no Korean)."
+
+    # 안전 규칙 (TTS에서 문제되는 기호/형식 최소화)
+    safety_rules = """- 출력은 순수 텍스트만(제목/섹션표시/마크다운 금지)
+- 금지: `, **, *, #, 코드블록/링크
+- 금지: [SFX: ...] 같은 효과음 표기
+- 금지: `$` 포함 LaTeX 표기. 수식/기호는 반드시 구어체로 변환"""
+
+    if math_focus:
+        math_rule = f'- math_focus "{math_focus}"는 표기 그대로 금지 → 구어체로 변환 후 의미 설명'
+    else:
+        math_rule = "- 수식/기호가 나오면 표기 그대로 금지 → 구어체로 변환"
+
+    boundary_rule = ""
+    if opening_line:
+        boundary_rule += f'- 첫 문장은 반드시 다음 문장으로 시작: "{opening_line}"\n'
+    if closing_line:
+        boundary_rule += f'- 마지막 문장은 반드시 다음 문장으로 끝: "{closing_line}"\n'
+    if not boundary_rule:
+        boundary_rule = "- opening_line/closing_line이 없으면 자연스럽게 시작/종료"
+
+    prompt = f"""# Writer (TTS Script)
+Segment {segment_id}: {segment_title}
+
+## Context
+- Language: {lang_display}
+- Listener: {listener_name}
+- Persona: {selected_persona}
+- Segment goal: {core_content}
+
+## Constraints (must)
+{language_constraint}
+{safety_rules}
+{math_rule}
+{boundary_rule}
+- 메타 멘트 금지(예: '이 세그먼트에서는', '지금부터 설명할게요' 같은 안내문)
+
+## Showrunner instruction (highest priority)
+{instruction if instruction else "(없음)"}
+
+## Category guideline
+{category_guideline}
+
+## Markup tags (optional)
+{markup_guide}
+
+## Input text
+{full_text}
+
+Output ONLY the script text."""
+    
+    return prompt
+
+# 전역 변수로 선택된 모델 저장
+_selected_gemini_model = None
+
+def set_gemini_model(model_key: str):
+    """선택된 Gemini 모델을 설정합니다."""
+    global _selected_gemini_model
+    _selected_gemini_model = model_key
+
+def get_gemini_model(model_key: str = None):
+    """
+    Gemini 모델을 초기화하고 반환합니다.
+    
+    Args:
+        model_key: 모델 키 ("gemini-2.5-pro" 또는 "gemini-2.5-flash"). 
+                   None이면 전역 변수에서 가져옵니다.
+    
+    Returns:
+        초기화된 Gemini 모델
+    """
+    global _selected_gemini_model
+    
+    # 모델 키 결정: 파라미터 > 전역 변수 > 기본값
+    if model_key:
+        target_model = model_key
+    elif _selected_gemini_model:
+        target_model = _selected_gemini_model
+    else:
+        # 기본값: gemini-2.5-pro
+        target_model = "gemini-2.5-pro"
+    
+    # 모델 이름 변환 (키 -> 전체 모델 이름)
+    model_name_map = {
+        "gemini-2.5-pro": "models/gemini-2.5-pro",
+        "gemini-2.5-flash": "models/gemini-2.5-flash"
+    }
+    
+    full_model_name = model_name_map.get(target_model, f"models/{target_model}")
+    
+    try:
+        model = genai.GenerativeModel(full_model_name)
+        print(f"  ✓ Model initialized: {target_model} ({full_model_name})", flush=True)
+        return model
+    except Exception as e:
+        print(f"  ✗ Failed to initialize model {target_model}: {e}", flush=True)
+        # 폴백: 다른 모델 시도
+        fallback_models = ["gemini-2.5-pro", "gemini-2.5-flash"]
+        for fallback in fallback_models:
+            if fallback != target_model:
+                try:
+                    fallback_full = model_name_map.get(fallback, f"models/{fallback}")
+                    model = genai.GenerativeModel(fallback_full)
+                    print(f"  ⚠ Fallback to: {fallback} ({fallback_full})", flush=True)
+                    return model
+                except:
+                    continue
+        
+        # 모든 모델 실패 시 예외 발생
+        raise ValueError(f"Failed to initialize Gemini model. Tried: {target_model} and fallbacks")
+
+def _extract_json_text(response_text: str) -> str:
+    """
+    LLM 응답 텍스트에서 JSON 본문만 최대한 안전하게 추출합니다.
+    - ```json ... ``` 또는 ``` ... ``` 블록이 있으면 우선 추출
+    - 그 외에는 첫 '{'부터 마지막 '}'까지를 잘라 JSON 후보를 만듭니다.
+    """
+    if not response_text:
+        return ""
+    text = response_text.strip()
+
+    # fenced code block 우선
+    if "```json" in text:
+        try:
+            return text.split("```json", 1)[1].split("```", 1)[0].strip()
+        except Exception:
+            pass
+    if "```" in text:
+        try:
+            return text.split("```", 1)[1].split("```", 1)[0].strip()
+        except Exception:
+            pass
+
+    # braces 기반 fallback
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        return text[first:last + 1].strip()
+    return text
+
+
+def generate_content_with_retry(
+    model,
+    prompt,
+    max_retries=5,
+    initial_delay=1,
+    enable_model_fallback=True,
+    timeout_seconds: float | None = 180.0,
+):
+    """재시도 로직이 포함된 generate_content 호출 (개선 버전).
+    
+    DeadlineExceeded 에러 발생 시:
+    1. Generation Config로 출력 토큰 제한을 점진적으로 감소
+    2. 더 빠른 모델로 자동 전환 (2번째 재시도부터)
+    3. 지수 백오프로 재시도 간격 조정
+    
+    타임아웃:
+    - timeout_seconds가 None이면 타임아웃 없이 완료될 때까지 대기합니다.
+    - 기본값은 180초입니다.
+    """
+    from .config import DEBUG_LOG_ENABLED, DEBUG_LOG_PATH
+    
+    current_model = model
+    original_prompt = prompt
+    
+    # Generation Config (타임아웃 발생 시 출력 토큰 조정)
+    base_max_tokens = 8192
+    current_max_tokens = base_max_tokens
+    
+    for attempt in range(max_retries):
+        try:
+            # 디버그 로그 (개발용, 환경 변수로 제어)
+            if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+                try:
+                    DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                        import json
+                        log_entry = {
+                            "sessionId": "debug-session",
+                            "runId": "showrunner-debug-1",
+                            "hypothesisId": "H1,H2,H3",
+                            "location": "utils.py:generate_content_with_retry",
+                            "message": "generate_content_with_retry attempt",
+                            "data": {
+                                "attempt": attempt + 1,
+                                "max_retries": max_retries,
+                                "initial_delay": initial_delay,
+                                "prompt_len_chars": len(prompt),
+                                "prompt_len_bytes": len(prompt.encode('utf-8')),
+                                "max_output_tokens": current_max_tokens,
+                                "model": str(current_model)
+                            },
+                            "timestamp": int(time.time() * 1000)
+                        }
+                        f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                except: 
+                    pass
+            
+            # Generation Config 적용 (재시도 시 출력 토큰 감소)
+            if attempt > 0:
+                # 재시도 시 출력 토큰을 15%씩 줄임 (최소 2048까지)
+                reduction_factor = 1.0 - (0.15 * attempt)
+                current_max_tokens = max(2048, int(base_max_tokens * reduction_factor))
+                
+                generation_config = genai.types.GenerationConfig(
+                    max_output_tokens=current_max_tokens,
+                    temperature=0.7
+                )
+                # 타임아웃(옵션) 적용하여 실행
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        current_model.generate_content,
+                        prompt,
+                        generation_config=generation_config
+                    )
+                    if timeout_seconds is None:
+                        return future.result()
+                    return future.result(timeout=timeout_seconds)
+            else:
+                # 타임아웃(옵션) 적용하여 실행
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        current_model.generate_content,
+                        prompt
+                    )
+                    if timeout_seconds is None:
+                        return future.result()
+                    return future.result(timeout=timeout_seconds)
+                
+        except TimeoutError as e:
+            # ThreadPoolExecutor future.result(timeout=...)에서 발생하는 TimeoutError
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(
+                    f"⏱️  Request timed out after {timeout_seconds}s. Retrying in {delay:.1f}s... "
+                    f"(Attempt {attempt + 1}/{max_retries})",
+                    flush=True,
+                )
+
+                # 더 빠른 모델로 전환 (선택)
+                if enable_model_fallback and attempt >= 1:
+                    try:
+                        model_name = str(current_model)
+                        if "gemini-2.5-pro" in model_name:
+                            faster_model = genai.GenerativeModel("models/gemini-2.5-flash")
+                            current_model = faster_model
+                            print("  🔄 Switched to faster model: gemini-2.5-flash", flush=True)
+                    except Exception as fallback_error:
+                        print(f"  ⚠ Model fallback failed: {fallback_error}", flush=True)
+
+                time.sleep(delay)
+                continue
+            raise
+                
+        except exceptions.DeadlineExceeded as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(f"⏱️  Deadline exceeded. Retrying in {delay:.1f}s... (Attempt {attempt + 1}/{max_retries})", flush=True)
+                
+                # 전략 1: 더 빠른 모델로 전환 (2번째 재시도부터, gemini-2.5-pro만)
+                if enable_model_fallback and attempt >= 1:
+                    try:
+                        # 현재 모델 이름 확인
+                        model_name = str(current_model)
+                        if "gemini-2.5-pro" in model_name:
+                            # gemini-2.5-pro만 Flash 모델로 전환
+                            faster_model = genai.GenerativeModel('models/gemini-2.5-flash')
+                            faster_model_name = "gemini-2.5-flash"
+                            current_model = faster_model
+                            print(f"  🔄 Switched to faster model: {faster_model_name}", flush=True)
+                    except Exception as fallback_error:
+                        print(f"  ⚠ Model fallback failed: {fallback_error}", flush=True)
+                
+                # 전략 2: 다음 시도에서 출력 토큰 제한 감소 (이미 위에서 처리됨)
+                if attempt >= 1:
+                    next_max_tokens = max(2048, int(base_max_tokens * (1.0 - 0.15 * (attempt + 1))))
+                    if next_max_tokens < current_max_tokens:
+                        print(f"  📉 Will reduce max_output_tokens to {next_max_tokens} on next attempt", flush=True)
+                
+                time.sleep(delay)
+            else:
+                print(f"❌ Maximum retry count ({max_retries}) reached for deadline exceeded.", flush=True)
+                raise
+        except exceptions.ResourceExhausted as e:
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                error_str = str(e)
+                if "retry in" in error_str.lower():
+                    try:
+                        match = re.search(r'retry in ([\d.]+)s', error_str, re.IGNORECASE)
+                        if match:
+                            delay = float(match.group(1)) + 1
+                    except:
+                        pass
+                
+                print(f"Quota exceeded error. Retrying in {delay:.1f} seconds... (Attempt {attempt + 1}/{max_retries})", flush=True)
+                time.sleep(delay)
+            else:
+                print(f"Maximum retry count ({max_retries}) reached.", flush=True)
+            # 디버그 로그 (개발용)
+            if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+                try:
+                    DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                        import json
+                        log_entry = {
+                            "sessionId": "debug-session",
+                            "runId": "showrunner-debug-1",
+                            "hypothesisId": "H2",
+                            "location": "utils.py:generate_content_with_retry",
+                            "message": "ResourceExhausted in generate_content_with_retry",
+                            "data": {
+                                "attempt": attempt + 1,
+                                "error_type": type(e).__name__,
+                                "error_msg": str(e)
+                            },
+                            "timestamp": int(time.time() * 1000)
+                        }
+                        f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                except: 
+                    pass
+                raise
+        except Exception as e:
+            # 디버그 로그 (개발용)
+            if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+                try:
+                    DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                        import json
+                        log_entry = {
+                            "sessionId": "debug-session",
+                            "runId": "showrunner-debug-1",
+                            "hypothesisId": "H2,H3",
+                            "location": "utils.py:generate_content_with_retry",
+                            "message": "Non-ResourceExhausted exception in generate_content_with_retry",
+                            "data": {
+                                "attempt": attempt + 1,
+                                "error_type": type(e).__name__,
+                                "error_msg": str(e)
+                            },
+                            "timestamp": int(time.time() * 1000)
+                        }
+                        f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                except: 
+                    pass
+            raise
+
+def get_listener_names(name: str) -> dict:
+    """청취자 이름을 한국어/영어 표현에 모두 사용할 수 있도록 가공합니다."""
+    base = (name or "용사").strip()
+    if not base:
+        base = "용사"
+    
+    existing_suffixes = ("이는", "는", "은", "이가", "가", "이")
+    if base.endswith(existing_suffixes):
+        for suf in existing_suffixes:
+            if base.endswith(suf):
+                base = base[:-len(suf)]
+                break
+    
+    def has_final_consonant(text: str) -> bool:
+        if not text:
+            return False
+        last_char = text[-1]
+        if '가' <= last_char <= '힣':
+            code = ord(last_char) - ord('가')
+            final = code % 28
+            return final != 0
+        return False
+    
+    has_final = has_final_consonant(base)
+    
+    if has_final:
+        with_eun = f"{base}은"
+        with_neun = f"{base}는"
+        with_i = f"{base}이"
+        with_ga = f"{base}가"
+    else:
+        with_eun = f"{base}은"
+        with_neun = f"{base}는"
+        with_i = f"{base}이"
+        with_ga = f"{base}가"
+    
+    suffix = f"{base}이는"
+    
+    return {
+        "base": base,
+        "suffix": suffix,
+        "with_eun": with_eun,
+        "with_neun": with_neun,
+        "with_i": with_i,
+        "with_ga": with_ga
+    }
+
+
+def prompt_listener_name(default_name: str = "용사") -> str:
+    """
+    콘솔에서 청취자 이름을 입력받습니다.
+    """
+    print("\n📌 청취자 이름을 입력하세요.", flush=True)
+    print("  ℹ︎ 이 이름은 대본에서 호칭으로 사용됩니다.", flush=True)
+    print("  ℹ︎ 한국어 대본에서는 자동으로 적절한 조사(은/는, 이/가)가 붙습니다.", flush=True)
+    print("="*70, flush=True)
+    try:
+        user_input = input(f"\n👉 청취자 이름을 입력하세요 (기본값: {default_name}, Enter로 기본값 사용): ").strip()
+        if not user_input:
+            print(f"  ✓ 기본 이름 '{default_name}'을 사용합니다.", flush=True)
+            return default_name
+        print(f"  ✓ '{user_input}' 이름을 사용합니다.", flush=True)
+        return user_input
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  ✓ 입력이 취소되어 기본 이름 '{default_name}'을 사용합니다.", flush=True)
+        return default_name
+
+
+def extract_key_sections(text: str, max_length: int = 50000) -> str:
+    """Showrunner용: 논문에서 핵심 섹션만 추출합니다."""
+    if not text:
+        return ""
+    
+    cleaned = text.strip()
+    if not cleaned:
+        return ""
+    
+    text_bytes = len(cleaned.encode('utf-8'))
+    if text_bytes <= max_length:
+        return cleaned
+    
+    section_patterns = [
+        (r'(?:^|\n)\s*abstract\s*[:\n]+', 'abstract'),
+        (r'(?:^|\n)\s*(?:1\s*\.?\s*)?introduction\s*[:\n]+', 'introduction'),
+        (r'(?:^|\n)\s*(?:2\s*\.?\s*)?(?:related\s+work|background)\s*[:\n]+', 'related_work'),
+        (r'(?:^|\n)\s*(?:3\s*\.?\s*)?(?:methodology|method|approach)\s*[:\n]+', 'methodology'),
+        (r'(?:^|\n)\s*(?:4\s*\.?\s*)?(?:experiments?|results?|evaluation)\s*[:\n]+', 'experiments'),
+        (r'(?:^|\n)\s*(?:5\s*\.?\s*)?(?:conclusion|discussion|future\s+work)\s*[:\n]+', 'conclusion'),
+    ]
+    
+    sections = {}
+    for pattern, name in section_patterns:
+        match = re.search(pattern, cleaned, flags=re.IGNORECASE)
+        if match:
+            start_idx = match.start()
+            remaining = cleaned[start_idx:]
+            next_match = None
+            for next_pattern, _ in section_patterns:
+                if next_pattern != pattern:
+                    next_match = re.search(next_pattern, remaining[1:], flags=re.IGNORECASE)
+                    if next_match:
+                        break
+            
+            if next_match:
+                end_idx = start_idx + next_match.start() + 1
+                sections[name] = cleaned[start_idx:end_idx]
+            else:
+                sections[name] = cleaned[start_idx:]
+    
+    key_sections = []
+    priority_sections = ['abstract', 'introduction', 'methodology', 'conclusion']
+    
+    for section_name in priority_sections:
+        if section_name in sections:
+            key_sections.append(sections[section_name])
+    
+    for section_name, content in sections.items():
+        if section_name not in priority_sections:
+            current_text = '\n\n'.join(key_sections)
+            current_bytes = len(current_text.encode('utf-8'))
+            content_bytes = len(content.encode('utf-8'))
+            if current_bytes + content_bytes <= max_length:
+                key_sections.append(content)
+    
+    result = '\n\n'.join(key_sections)
+    
+    result_bytes = len(result.encode('utf-8'))
+    if result_bytes > max_length:
+        result_encoded = result.encode('utf-8')
+        result = result_encoded[:max_length].decode('utf-8', errors='ignore')
+    
+    return result.strip()
+
+def extract_relevant_sections(text: str, segment_info: dict, max_length: int = 30000) -> str:
+    """Writer용: 세그먼트에 관련된 섹션만 추출합니다."""
+    if not text or not segment_info:
+        return ""
+    
+    opening_line = segment_info.get("opening_line", "")
+    closing_line = segment_info.get("closing_line", "")
+    math_focus = segment_info.get("math_focus", "")
+    
+    if not opening_line and not closing_line:
+        # 메타데이터가 없으면 전체 텍스트의 일부만 반환 (bytes 기준으로 안전하게 컷)
+        text_bytes = text.encode("utf-8")
+        if len(text_bytes) <= max_length:
+            return text
+        return text_bytes[:max_length].decode("utf-8", errors="ignore")
+    
+    # opening_line과 closing_line을 찾아서 해당 구간 추출
+    text_lower = text.lower()
+    opening_lower = opening_line.lower().strip() if opening_line else ""
+    closing_lower = closing_line.lower().strip() if closing_line else ""
+    
+    start_idx = 0
+    end_idx = len(text)
+    
+    if opening_lower:
+        # opening_line을 찾기 (유사도 기반)
+        opening_words = opening_lower.split()[:5]  # 처음 5개 단어만 사용
+        for i in range(len(text) - 50):
+            window = text_lower[i:i+200]
+            if any(word in window for word in opening_words if len(word) > 3):
+                start_idx = i
+                break
+    
+    if closing_lower:
+        # closing_line을 찾기
+        closing_words = closing_lower.split()[:5]
+        for i in range(start_idx, len(text) - 50):
+            window = text_lower[i:i+200]
+            if any(word in window for word in closing_words if len(word) > 3):
+                end_idx = i + 200
+                break
+    
+    extracted = text[start_idx:end_idx]
+    
+    # max_length 제한
+    if len(extracted.encode('utf-8')) > max_length:
+        extracted_encoded = extracted.encode('utf-8')
+        extracted = extracted_encoded[:max_length].decode('utf-8', errors='ignore')
+    
+    return extracted.strip()
+
+
+def enforce_segment_count(segments: list[dict], target: int = 15) -> list[dict]:
+    """세그먼트 개수를 목표 개수로 강제합니다."""
+    if not segments:
+        # 빈 세그먼트 리스트면 기본 세그먼트 생성
+        return [{"segment_id": i+1, "opening_line": "", "closing_line": "", "math_focus": ""} for i in range(target)]
+    
+    current_count = len(segments)
+    
+    if current_count == target:
+        return segments
+    
+    if current_count < target:
+        # 부족하면 마지막 세그먼트를 복제하여 채움
+        last_segment = segments[-1] if segments else {"segment_id": 1, "opening_line": "", "closing_line": "", "math_focus": ""}
+        for i in range(current_count, target):
+            new_segment = last_segment.copy()
+            new_segment["segment_id"] = i + 1
+            segments.append(new_segment)
+    
+    elif current_count > target:
+        # 초과하면 마지막 세그먼트들을 제거
+        segments = segments[:target]
+        # segment_id 재정렬
+        for i, seg in enumerate(segments):
+            seg["segment_id"] = i + 1
+    
+    return segments
+
+
+def remove_ssml_tags(text: str) -> str:
+    """
+    SSML 태그를 제거하되, Gemini-TTS markup tag는 보존합니다.
+    
+    Gemini-TTS markup tag 형식: [tag_name] (예: [sigh], [short pause], [whispering])
+    SSML 태그 형식: <tag>content</tag> (예: <speak>...</speak>)
+    """
+    if not text:
+        return ""
+    
+    # SSML 태그만 제거 (꺾쇠괄호로 둘러싸인 태그)
+    # Gemini-TTS markup tag는 대괄호로 둘러싸여 있으므로 보존됨
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()
+
+
+def chunk_text_for_tts(text: str, language: str = "ko", tts_prompt: str = "", max_chunk_length: int = None) -> list[str]:
+    """
+    TTS용 텍스트를 청크로 분할합니다.
+    
+    Gemini-TTS 제한: input.text + input.prompt의 합이 4000 bytes를 초과하면 안 됩니다.
+    따라서 tts_prompt 길이를 고려하여 text의 최대 길이를 조정합니다.
+    """
+    if not text:
+        return []
+    
+    # SSML 태그 제거
+    text = remove_ssml_tags(text)
+    
+    # tts_prompt 길이 계산 (UTF-8 바이트)
+    prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8'))
+    
+    # text의 최대 길이 = 4000 - prompt 길이 (안전 마진 200 bytes)
+    # max_chunk_length가 지정되지 않았으면 자동 계산
+    if max_chunk_length is None:
+        max_chunk_length = 4000 - prompt_bytes - 200  # 안전 마진
+        if max_chunk_length < 500:  # 최소 500 bytes는 보장
+            max_chunk_length = 500
+    else:
+        # 지정된 max_chunk_length도 prompt를 고려하여 조정
+        max_chunk_length = min(max_chunk_length, 4000 - prompt_bytes - 200)
+        if max_chunk_length < 500:
+            max_chunk_length = 500
+    
+    # 문장 단위로 분할 (구분자 보존)
+    if language == "ko":
+        sentence_endings = r'[.!?。！？]'
+    else:
+        sentence_endings = r'[.!?]'
+    
+    # 구분자를 포함한 문장 추출 (re.finditer 사용)
+    sentences_with_endings = []
+    pattern = re.compile(f'(.+?)({sentence_endings})(\\s*)', re.DOTALL)
+    
+    last_end = 0
+    for match in pattern.finditer(text):
+        sentence_text = match.group(1).strip()
+        ending = match.group(2)  # 구분자 (. ! ? 등)
+        trailing_space = match.group(3)  # 구분자 뒤 공백
+        
+        if sentence_text:
+            # 구분자와 함께 문장 저장
+            full_sentence = sentence_text + ending + trailing_space
+            sentences_with_endings.append(full_sentence)
+        last_end = match.end()
+    
+    # 마지막 부분 처리 (구분자가 없는 나머지 텍스트)
+    if last_end < len(text):
+        remaining = text[last_end:].strip()
+        if remaining:
+            sentences_with_endings.append(remaining)
+    
+    # 구분자가 없는 문장이 있으면 원본 텍스트를 그대로 사용
+    if not sentences_with_endings:
+        sentences_with_endings = [text]
+    
+    chunks = []
+    current_chunk = ""
+    
+    for sentence in sentences_with_endings:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+            
+        # 현재 청크에 문장 추가 시도
+        # 문장들은 이미 구분자와 공백을 포함하고 있으므로 자연스럽게 연결
+        if current_chunk:
+            # current_chunk 끝이 공백이 아니면 공백 하나 추가
+            if not current_chunk.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
+                # 구분자로 끝나지 않으면 공백 추가
+                test_chunk = current_chunk.rstrip() + " " + sentence
+            else:
+                # 구분자로 끝나면 이미 공백이 포함되어 있을 수 있으므로 확인
+                if current_chunk.endswith(" "):
+                    test_chunk = current_chunk + sentence
+                else:
+                    test_chunk = current_chunk + " " + sentence
+        else:
+            test_chunk = sentence
+        
+        test_chunk_bytes = len(test_chunk.encode('utf-8'))
+        if test_chunk_bytes <= max_chunk_length:
+            current_chunk = test_chunk
+        else:
+            # 현재 청크를 저장
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            # 문장 자체가 max_chunk_length를 초과하면 강제로 자름
+            sentence_bytes = len(sentence.encode('utf-8'))
+            if sentence_bytes > max_chunk_length:
+                # 문장을 단어 단위로 자름
+                words = sentence.split()
+                temp_chunk = ""
+                for word in words:
+                    test_word_chunk = temp_chunk + " " + word if temp_chunk else word
+                    if len(test_word_chunk.encode('utf-8')) <= max_chunk_length:
+                        temp_chunk = test_word_chunk
+                    else:
+                        if temp_chunk:
+                            chunks.append(temp_chunk.strip())
+                        temp_chunk = word
+                current_chunk = temp_chunk
+            else:
+                current_chunk = sentence
+    
+    if current_chunk:
+        chunks.append(current_chunk.strip())
+    
+    return chunks if chunks else [text]
+
+
+def parse_radio_show_dialogue(text: str) -> list[dict]:
+    """라디오쇼 대화를 파싱하여 화자별로 분리합니다."""
+    if not text:
+        return []
+    
+    # 화자 패턴 찾기 (예: "Host 1:", "Host 2:", "화자1:", "화자2:" 등)
+    patterns = [
+        r'(?:Host\s*[12]|화자\s*[12]|Speaker\s*[12])\s*[:：]\s*',
+        r'\[(?:Host|화자|Speaker)\s*[12]\]\s*',
+    ]
+    
+    dialogue_chunks = []
+    current_speaker = None
+    current_text = ""
+    
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        
+        speaker_found = None
+        for pattern in patterns:
+            match = re.match(pattern, line, re.IGNORECASE)
+            if match:
+                speaker_num = re.search(r'[12]', match.group(0))
+                if speaker_num:
+                    speaker_found = int(speaker_num.group(0))
+                    break
+        
+        if speaker_found:
+            if current_speaker and current_text:
+                dialogue_chunks.append({
+                    "speaker": current_speaker,
+                    "text": current_text.strip()
+                })
+            current_speaker = speaker_found
+            current_text = line[line.index(':')+1:].strip() if ':' in line else line
+        else:
+            if current_speaker:
+                current_text += " " + line
+    
+    if current_speaker and current_text:
+        dialogue_chunks.append({
+            "speaker": current_speaker,
+            "text": current_text.strip()
+        })
+    
+    return dialogue_chunks
+
+
+def merge_dialogue_chunks(chunks: list[dict]) -> list[dict]:
+    """같은 화자의 연속 대사를 병합합니다."""
+    if not chunks:
+        return []
+    
+    merged = []
+    current_speaker = None
+    current_text = ""
+    
+    for chunk in chunks:
+        speaker = chunk.get("speaker")
+        text = chunk.get("text", "")
+        
+        if speaker == current_speaker:
+            current_text += " " + text
+        else:
+            if current_speaker is not None:
+                merged.append({
+                    "speaker": current_speaker,
+                    "text": current_text.strip()
+                })
+            current_speaker = speaker
+            current_text = text
+    
+    if current_speaker is not None:
+        merged.append({
+            "speaker": current_speaker,
+            "text": current_text.strip()
+        })
+    
+    return merged
+
+
+def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_prompt: str = "") -> bytes:
+    """
+    단일 텍스트를 음성으로 합성합니다 (Gemini-TTS 사용).
+    
+    참고: Gemini-TTS 문서 (https://docs.cloud.google.com/text-to-speech/docs/gemini-tts)
+    제한: input.text + input.prompt의 합이 4000 bytes를 초과하면 안 됩니다.
+    """
+    from .config import DEBUG_LOG_ENABLED, DEBUG_LOG_PATH
+    
+    # 디버그 로그 (개발용)
+    if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+        try:
+            DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                import json
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "A",
+                    "location": "utils.py:synthesize_speech_single",
+                    "message": "synthesize_speech_single entry",
+                    "data": {
+                        "text_bytes": len(text.encode('utf-8')),
+                        "prompt_bytes": len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8')),
+                        "total_bytes": len(text.encode('utf-8')) + (len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8')))
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        except: 
+            pass
+    
+    client = texttospeech.TextToSpeechClient()
+    
+    voice_name = voice_profile.get("name", "Achernar")
+    gender = voice_profile.get("gender", "FEMALE")
+    
+    if language == "ko":
+        language_code = "ko-KR"
+    else:
+        language_code = "en-US"
+    
+    # 프롬프트 결정
+    actual_prompt = tts_prompt if tts_prompt else "Say the following"
+    
+    # 길이 검증: text + prompt의 합이 4000 bytes를 초과하면 text를 자름
+    text_bytes = len(text.encode('utf-8'))
+    prompt_bytes = len(actual_prompt.encode('utf-8'))
+    total_bytes = text_bytes + prompt_bytes
+    
+    # 디버그 로그 (개발용)
+    if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+        try:
+            DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                import json
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "A",
+                    "location": "utils.py:synthesize_speech_single",
+                    "message": "synthesize_speech_single length check",
+                    "data": {
+                        "text_bytes": text_bytes,
+                        "prompt_bytes": prompt_bytes,
+                        "total_bytes": total_bytes,
+                        "limit": 4000,
+                        "needs_truncation": total_bytes > 4000
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        except: 
+            pass
+    
+    if total_bytes > 4000:
+        # text를 자름 (안전 마진 100 bytes)
+        max_text_bytes = 4000 - prompt_bytes - 100
+        if max_text_bytes < 100:
+            max_text_bytes = 100
+        
+        # UTF-8 바이트 단위로 자름
+        text_encoded = text.encode('utf-8')
+        if len(text_encoded) > max_text_bytes:
+            text_encoded = text_encoded[:max_text_bytes]
+            # 마지막 바이트가 잘린 문자를 방지하기 위해 안전하게 디코딩
+            while True:
+                try:
+                    text = text_encoded.decode('utf-8')
+                    break
+                except UnicodeDecodeError:
+                    text_encoded = text_encoded[:-1]
+                    if len(text_encoded) == 0:
+                        text = ""
+                        break
+        
+        # 디버그 로그 (개발용)
+        if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+            try:
+                DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                    import json
+                    log_entry = {
+                        "sessionId": "debug-session",
+                        "runId": "run1",
+                        "hypothesisId": "A",
+                        "location": "utils.py:synthesize_speech_single",
+                        "message": "synthesize_speech_single text truncated",
+                        "data": {
+                            "original_bytes": text_bytes,
+                            "truncated_bytes": len(text.encode('utf-8')),
+                            "new_total_bytes": len(text.encode('utf-8')) + prompt_bytes
+                        },
+                        "timestamp": int(time.time() * 1000)
+                    }
+                    f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+            except: 
+                pass
+    
+    # Gemini-TTS 설정
+    # model_name: gemini-2.5-pro-tts (고품질, 오디오북/팟캐스트에 최적화)
+    # speaker: 언어 코드 접두사 없이 음성 이름만 사용 (예: "Kore", "Achernar")
+    voice = texttospeech.VoiceSelectionParams(
+        language_code=language_code,
+        name=voice_name,  # Gemini-TTS는 언어 코드 접두사 없이 speaker 이름만 사용
+        model_name="gemini-2.5-pro-tts",  # Gemini-TTS Pro 모델 사용 (고품질)
+    )
+    
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3,
+        speaking_rate=1.0,
+        pitch=0.0,
+        volume_gain_db=0.0,
+    )
+    
+    # Gemini-TTS: prompt와 text 필드를 모두 사용
+    # prompt: 스타일 지시사항 (예: "Say the following in a friendly way")
+    # text: 실제 합성할 텍스트
+    synthesis_input = texttospeech.SynthesisInput(
+        prompt=actual_prompt,  # Gemini-TTS의 스타일 프롬프트
+        text=text,  # 실제 합성할 텍스트
+    )
+    
+    # 디버그 로그 (개발용)
+    if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+        try:
+            DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                import json
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "A",
+                    "location": "utils.py:synthesize_speech_single",
+                    "message": "synthesize_speech_single API call BEFORE",
+                    "data": {
+                        "final_text_bytes": len(text.encode('utf-8')),
+                        "final_prompt_bytes": len(actual_prompt.encode('utf-8')),
+                        "final_total_bytes": len(text.encode('utf-8')) + len(actual_prompt.encode('utf-8'))
+                    },
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        except: 
+            pass
+    
+    response = client.synthesize_speech(
+        input=synthesis_input,
+        voice=voice,
+        audio_config=audio_config,
+    )
+    
+    # 디버그 로그 (개발용)
+    if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+        try:
+            DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                import json
+                log_entry = {
+                    "sessionId": "debug-session",
+                    "runId": "run1",
+                    "hypothesisId": "A",
+                    "location": "utils.py:synthesize_speech_single",
+                    "message": "synthesize_speech_single API call SUCCESS",
+                    "data": {"audio_content_length": len(response.audio_content)},
+                    "timestamp": int(time.time() * 1000)
+                }
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+        except: 
+            pass
+    
+    return response.audio_content
+
+
+def _wait_for_rate_limit():
+    """분당 9개 제한을 위한 rate limiting. 각 요청 전에 호출해야 함."""
+    global _tts_request_times
+    with _tts_request_lock:
+        now = time.time()
+        # 1분 이전의 기록 제거
+        while _tts_request_times and _tts_request_times[0] < now - 60:
+            _tts_request_times.popleft()
+        
+        # 분당 9개 제한 확인
+        if len(_tts_request_times) >= int(QUOTA_TTS_RPM):
+            # 가장 오래된 요청이 1분 전이 될 때까지 대기
+            wait_time = _tts_request_times[0] + 60 - now + 0.1  # 0.1초 안전 마진
+            if wait_time > 0:
+                time.sleep(wait_time)
+                # 다시 정리
+                now = time.time()
+                while _tts_request_times and _tts_request_times[0] < now - 60:
+                    _tts_request_times.popleft()
+        
+        # 현재 요청 시간 기록
+        _tts_request_times.append(time.time())
+
+
+def synthesize_with_retry(
+    chunk: str,
+    profile: dict,
+    lang: str,
+    prompt: str,
+    max_retries: int = 5,
+    chunk_index: int = None,
+    total_chunks: int = None
+) -> tuple[bytes, int]:
+    """
+    지수 백오프(Exponential Backoff)를 적용한 단일 TTS 요청 함수.
+    - 429 / ResourceExhausted 등 레이트 리밋 에러가 날 경우 대기 후 재시도.
+    
+    Args:
+        chunk: 합성할 텍스트 청크
+        profile: 음성 프로필
+        lang: 언어 코드
+        prompt: TTS 프롬프트
+        max_retries: 최대 재시도 횟수
+        chunk_index: 청크 인덱스 (로깅용)
+        total_chunks: 전체 청크 수 (로깅용)
+    
+    Returns:
+        (audio_data, input_bytes): 오디오 데이터와 입력 바이트 수 (text + prompt)
+    """
+    delay = 1.0  # 초기 대기 시간 (초)
+    
+    # 입력 바이트 수 계산 (API 호출 전에 미리 계산)
+    text_bytes = len(chunk.encode('utf-8'))
+    prompt_bytes = len(prompt.encode('utf-8')) if prompt else 0
+    input_bytes = text_bytes + prompt_bytes
+    
+    # 청크 정보 문자열 (로깅용)
+    chunk_info = f"Chunk {chunk_index+1}/{total_chunks}" if chunk_index is not None and total_chunks is not None else "Chunk"
+    
+    # 재시도 내역 추적
+    retry_history = []
+    
+    for attempt in range(max_retries):
+        request_start_time = time.time()
+        current_time_str = datetime.now().strftime("%H:%M:%S")
+        
+        try:
+            # 요청 전송 전 로깅
+            if attempt == 0:
+                print(f"  [{current_time_str}] 📤 {chunk_info}: Sending request ({input_bytes}B)...", flush=True)
+            else:
+                print(f"  [{current_time_str}] 🔄 {chunk_info}: Retry attempt {attempt+1}/{max_retries} ({input_bytes}B)...", flush=True)
+            
+            result = synthesize_speech_single(chunk, profile, lang, prompt)
+            
+            if result:
+                request_duration = time.time() - request_start_time
+                audio_size_kb = len(result) / 1024.0
+                current_time_str = datetime.now().strftime("%H:%M:%S")
+                print(f"  [{current_time_str}] ✅ {chunk_info}: Success ({input_bytes}B → {audio_size_kb:.1f}KB, {request_duration:.1f}s)", flush=True)
+                return result, input_bytes
+            else:
+                raise Exception("Empty response from synthesize_speech_single")
+                
+        except Exception as e:
+            request_duration = time.time() - request_start_time
+            error_str = str(e)
+            
+            # 에러 타입 분석
+            error_type = type(e).__name__
+            is_rate_limit = (
+                "429" in error_str
+                or "ResourceExhausted" in error_str
+                or "quota" in error_str.lower()
+                or "exceeded" in error_str.lower()
+            )
+            
+            # HTTP 상태 코드 추출 시도
+            http_status = None
+            if "500" in error_str:
+                http_status = "500"
+            elif "429" in error_str:
+                http_status = "429"
+            elif "400" in error_str:
+                http_status = "400"
+            elif "403" in error_str:
+                http_status = "403"
+            
+            # 에러 상세 정보
+            error_details = {
+                "attempt": attempt + 1,
+                "error_type": error_type,
+                "error_message": error_str[:200],  # 처음 200자만
+                "http_status": http_status,
+                "is_rate_limit": is_rate_limit,
+                "duration": request_duration,
+                "input_bytes": input_bytes
+            }
+            retry_history.append(error_details)
+            
+            current_time_str = datetime.now().strftime("%H:%M:%S")
+            
+            # 상세 에러 로깅
+            if http_status:
+                print(f"  [{current_time_str}] ❌ {chunk_info}: Request sent, got HTTP {http_status} ({error_type})", flush=True)
+            else:
+                print(f"  [{current_time_str}] ❌ {chunk_info}: Request sent, error occurred ({error_type})", flush=True)
+            
+            print(f"      └─ Error: {error_str[:150]}", flush=True)
+            print(f"      └─ Duration: {request_duration:.2f}s | Input: {input_bytes}B", flush=True)
+            
+            # 마지막 시도에서 실패하면 예외 전파
+            if attempt == max_retries - 1:
+                # 최종 실패 시 모든 재시도 내역 출력
+                print(f"\n  ⚠ {chunk_info}: All {max_retries} attempts failed", flush=True)
+                print(f"  📋 Retry History:", flush=True)
+                for i, hist in enumerate(retry_history, 1):
+                    status_info = f"HTTP {hist['http_status']}" if hist['http_status'] else "No HTTP status"
+                    print(f"    {i}. Attempt {hist['attempt']}: {status_info} | {hist['error_type']} | {hist['duration']:.2f}s", flush=True)
+                print(f"  💡 Request was sent {max_retries} times, but all failed.", flush=True)
+                raise
+            
+            if is_rate_limit:
+                # 레이트 리밋: 지수 백오프 + 지터
+                sleep_time = delay + random.uniform(0, 1.0)
+                print(f"      └─ [Rate Limit] Waiting {sleep_time:.2f}s before retry...", flush=True)
+                time.sleep(sleep_time)
+                delay *= 2
+            else:
+                # 일반 에러: 짧게 쉬고 재시도
+                print(f"      └─ Retrying in 1s...", flush=True)
+                time.sleep(1.0)
+
+
+def text_to_speech_from_chunks(
+    text_chunks: list[str],
+    output_filename: str,
+    voice_profile: dict,
+    language: str,
+    tts_prompt: str = ""
+) -> None:
+    """텍스트 청크들을 TTS로 변환하고 오디오 파일로 저장합니다.
+    
+    분당 9개 요청으로 제한하여 쿼터를 안전하게 관리합니다.
+    
+    주의: text_chunks는 이미 청킹이 완료된 상태여야 하며, 
+    이 함수는 청크를 그대로 TTS로 전달합니다. 추가 청킹이나 병합을 수행하지 않습니다.
+    """
+    if not text_chunks:
+        print("  ⚠ Warning: text_chunks is empty", flush=True)
+        return
+    
+    # 청크 검증: 각 청크가 적절한지 확인
+    prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8'))
+    max_allowed_bytes = 4000 - prompt_bytes - 100  # 안전 마진
+    
+    invalid_chunks = []
+    for i, chunk in enumerate(text_chunks):
+        chunk_bytes = len(chunk.encode('utf-8'))
+        if chunk_bytes > max_allowed_bytes:
+            invalid_chunks.append((i+1, chunk_bytes, max_allowed_bytes))
+    
+    if invalid_chunks:
+        print(f"  ⚠ Warning: {len(invalid_chunks)} chunks exceed size limit:", flush=True)
+        for idx, actual, max_size in invalid_chunks[:5]:  # 최대 5개만 출력
+            print(f"    Chunk {idx}: {actual} bytes (max: {max_size} bytes)", flush=True)
+        if len(invalid_chunks) > 5:
+            print(f"    ... and {len(invalid_chunks) - 5} more chunks", flush=True)
+        print("  ⚠ These chunks may be truncated during TTS synthesis", flush=True)
+    
+    audio_segments = []
+    total_requests = len(text_chunks)  # API 호출 수
+    
+    # 요청 간격 계산 (초)
+    request_interval = 60.0 / QUOTA_TTS_RPM
+    
+    # 실제 TTS 합성 시간을 고려한 예상 시간 (경험적 데이터: 청크당 약 25-30초)
+    # Rate Limit(6.7s) + 실제 합성 시간(~20s) ≈ 25-30초 per 청크
+    AVG_TTS_TIME_PER_CHUNK = 28.0  # 초 (초기 추정치, 실행 중 동적 조정)
+    est_duration_sec = total_requests * AVG_TTS_TIME_PER_CHUNK
+    est_duration_min = int(est_duration_sec // 60)
+    est_duration_sec_remainder = int(est_duration_sec % 60)
+    
+    # 예상 완료 시간 계산
+    start_datetime = datetime.now()
+    est_finish_datetime = start_datetime + timedelta(seconds=int(est_duration_sec))
+    est_finish_str = est_finish_datetime.strftime("%H:%M:%S")
+    
+    # ==== CLI 헤더 및 요약 정보 출력 ====
+    print("\n🎙️  Starting TTS Synthesis\n", flush=True)
+    print("  " + "-" * 60, flush=True)
+    print(f"  • Total Requests  : {total_requests}", flush=True)
+    print(f"  • Rate Limit      : {QUOTA_TTS_RPM:.0f} RPM (1 every {request_interval:.1f}s)", flush=True)
+    print(f"  • Est. Duration   : {est_duration_min}:{est_duration_sec_remainder:02d} (~{AVG_TTS_TIME_PER_CHUNK:.0f}s/chunk)", flush=True)
+    print(f"  • Est. Finish     : {est_finish_str}", flush=True)
+    print("  " + "-" * 60 + "\n", flush=True)
+    
+    # 실제 처리 시간 추적용
+    completion_times: list[float] = []  # 각 요청 완료까지 걸린 시간
+    
+    all_results: dict[int, bytes] = {}
+    all_failed_requests: list[int] = []
+    total_input_bytes = 0  # 전체 입력 바이트 수 추적
+    request_submit_times: dict[int, float] = {}  # 각 요청 제출 시간
+    
+    start_time = time.time()
+    
+    # 비동기 처리: ThreadPoolExecutor 사용하되 슬라이딩 윈도우로 제한
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_idx = {}
+        
+        # 모든 요청을 제출
+        # 처음 9개는 병렬로 한번에 보내기 (Rate Limit 체크 없음)
+        for i, chunk in enumerate(text_chunks):
+            # 입력 바이트 수 미리 계산
+            text_bytes = len(chunk.encode('utf-8'))
+            prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else 0
+            input_bytes = text_bytes + prompt_bytes
+            total_input_bytes += input_bytes
+            
+            # 모든 요청은 1초 간격으로 순차 전송
+            if i > 0:
+                time.sleep(1.0)
+            
+            # 10번째부터는 Rate Limit도 체크
+            if i >= int(QUOTA_TTS_RPM):
+                _wait_for_rate_limit()
+            
+            # 요청 시간 기록
+            with _tts_request_lock:
+                _tts_request_times.append(time.time())
+            
+            request_submit_times[i] = time.time()
+            
+            current_time_str = datetime.now().strftime("%H:%M:%S")
+            input_kb = input_bytes / 1024.0
+            print(f"  [{current_time_str}] ⏳ Sending {i+1}/{total_requests} ({input_kb:.1f}KB)...", flush=True)
+            
+            # 비동기로 제출 (청크 인덱스와 전체 청크 수 전달)
+            future = executor.submit(
+                synthesize_with_retry, 
+                chunk, 
+                voice_profile, 
+                language, 
+                tts_prompt,
+                5,  # max_retries
+                i,  # chunk_index
+                total_requests  # total_chunks
+            )
+            future_to_idx[future] = (i, input_bytes)
+        
+        print(f"\n  📡 All {total_requests} requests sent. Waiting for TTS synthesis...\n", flush=True)
+        
+        # 완료되는 대로 처리
+        completed_count = 0
+        for future in as_completed(future_to_idx):
+            idx, input_bytes = future_to_idx[future]
+            try:
+                audio_data, actual_input_bytes = future.result()
+                
+                if audio_data:
+                    all_results[idx] = audio_data
+                    completed_count += 1
+                    file_size_kb = len(audio_data) / 1024.0
+                    input_kb = input_bytes / 1024.0
+                    
+                    # 실제 처리 시간 계산 (요청 제출 → 완료)
+                    request_duration = time.time() - request_submit_times[idx]
+                    completion_times.append(request_duration)
+                    
+                    # ETA 계산: 마지막 요청이 완료될 때까지의 남은 시간
+                    current_time = time.time()
+                    remaining_requests = total_requests - completed_count
+                    
+                    if len(completion_times) >= 1:
+                        # 실제 측정된 평균 처리 시간 사용
+                        avg_time_per_request = sum(completion_times) / len(completion_times)
+                        
+                        # 아직 완료되지 않은 요청 중 가장 늦게 시작된 요청 찾기
+                        pending_indices = [i for i in range(total_requests) if i not in all_results and i not in all_failed_requests]
+                        if pending_indices:
+                            # 가장 늦게 시작된 요청의 시작 시간
+                            last_pending_submit_time = max(request_submit_times[i] for i in pending_indices)
+                            # 마지막 요청 완료까지 남은 시간 = (시작 시간 + 평균 처리 시간) - 현재 시간
+                            eta_seconds = (last_pending_submit_time + avg_time_per_request) - current_time
+                            eta_seconds = max(0, eta_seconds)
+                        else:
+                            # 모든 요청이 완료되었거나 진행 중
+                            eta_seconds = 0
+                    else:
+                        # 아직 완료된 요청이 없으면 초기 추정치 사용
+                        if request_submit_times:
+                            # 가장 늦게 시작된 요청 기준으로 계산
+                            last_submit = max(request_submit_times.values())
+                            eta_seconds = (last_submit + AVG_TTS_TIME_PER_CHUNK) - current_time
+                            eta_seconds = max(0, eta_seconds)
+                        else:
+                            eta_seconds = remaining_requests * AVG_TTS_TIME_PER_CHUNK
+                    
+                    # eta_seconds가 계산된 후 항상 eta_min과 eta_sec 계산
+                    eta_min = int(eta_seconds // 60)
+                    eta_sec = int(eta_seconds % 60)
+                    
+                    # 진행률 바 생성
+                    progress_pct = (completed_count / total_requests) * 100
+                    bar_len = 20
+                    filled = int(bar_len * completed_count / total_requests)
+                    bar = "█" * filled + "░" * (bar_len - filled)
+                    
+                    current_time_str = datetime.now().strftime("%H:%M:%S")
+                    success_count = len(all_results)
+                    failed_count = len(all_failed_requests)
+                    
+                    if completed_count < total_requests:
+                        print(f"  [{current_time_str}] ✅ Chunk {idx+1}/{total_requests}: SUCCESS ({input_kb:.1f}KB → {file_size_kb:.1f}KB, {request_duration:.1f}s)", flush=True)
+                        print(f"      └─ Progress: {completed_count}/{total_requests} [{bar}] {progress_pct:.0f}% | Success: {success_count} | Failed: {failed_count} | ETA: {eta_min}:{eta_sec:02d}", flush=True)
+                    else:
+                        total_elapsed = time.time() - start_time
+                        total_min = int(total_elapsed // 60)
+                        total_sec = int(total_elapsed % 60)
+                        print(f"  [{current_time_str}] ✅ Chunk {idx+1}/{total_requests}: SUCCESS ({input_kb:.1f}KB → {file_size_kb:.1f}KB, {request_duration:.1f}s)", flush=True)
+                        print(f"      └─ 🎉 All requests completed! Total: {total_min}:{total_sec:02d} | Success: {success_count} | Failed: {failed_count}", flush=True)
+                else:
+                    all_failed_requests.append(idx)
+                    current_time_str = datetime.now().strftime("%H:%M:%S")
+                    print(f"  [{current_time_str}] ❌ Chunk {idx+1}/{total_requests}: FAILED (Empty audio response)", flush=True)
+            except Exception as e:
+                all_failed_requests.append(idx)
+                current_time_str = datetime.now().strftime("%H:%M:%S")
+                error_str = str(e)
+                
+                # 에러 타입 분석
+                error_type = type(e).__name__
+                http_status = None
+                if "500" in error_str:
+                    http_status = "500"
+                elif "429" in error_str:
+                    http_status = "429"
+                elif "400" in error_str:
+                    http_status = "400"
+                elif "403" in error_str:
+                    http_status = "403"
+                
+                log_error(f"TTS synthesis failed for request {idx}: {e}", context="text_to_speech_from_chunks", exception=e)
+                
+                # 상세 실패 정보 출력
+                success_count = len(all_results)
+                failed_count = len(all_failed_requests) + 1  # 현재 실패 포함
+                
+                if http_status:
+                    print(f"  [{current_time_str}] ❌ Chunk {idx+1}/{total_requests}: FAILED (HTTP {http_status})", flush=True)
+                else:
+                    print(f"  [{current_time_str}] ❌ Chunk {idx+1}/{total_requests}: FAILED ({error_type})", flush=True)
+                print(f"      └─ Error: {error_str[:150]}", flush=True)
+                print(f"      └─ Retries: {5} attempts, all failed", flush=True)
+                print(f"      └─ Status: Success: {success_count} | Failed: {failed_count}", flush=True)
+    
+    elapsed = max(time.time() - start_time, 1e-6)
+    effective_rpm = (len(all_results) * 60.0) / elapsed
+    fail_count = len(all_failed_requests)
+    avg_input_bytes = total_input_bytes / total_requests if total_requests > 0 else 0
+    avg_completion_time = sum(completion_times) / len(completion_times) if completion_times else 0
+    
+    # 전체 결과 요약
+    elapsed_min = int(elapsed // 60)
+    elapsed_sec = int(elapsed % 60)
+    success_count = len(all_results)
+    success_rate = (success_count / total_requests) * 100 if total_requests > 0 else 0
+    
+    print("\n  " + "=" * 70, flush=True)
+    print("  📊 TTS Synthesis Summary", flush=True)
+    print("  " + "-" * 70, flush=True)
+    
+    # 성공/실패 통계
+    print(f"  ✅ Success     : {success_count}/{total_requests} chunks ({success_rate:.1f}%)", flush=True)
+    if fail_count > 0:
+        print(f"  ❌ Failed      : {fail_count}/{total_requests} chunks ({100-success_rate:.1f}%)", flush=True)
+    print(f"  ⏱️  Total Time  : {elapsed_min}:{elapsed_sec:02d} ({elapsed:.1f}s)", flush=True)
+    if completion_times:
+        print(f"  📈 Avg/Request : {avg_completion_time:.1f}s per chunk", flush=True)
+    print(f"  🚀 Throughput  : {effective_rpm:.1f} RPM", flush=True)
+    print(f"  📦 Avg Input   : {avg_input_bytes:.0f} bytes/request", flush=True)
+    
+    # 성공한 청크 목록
+    if all_results:
+        successful_chunks = sorted(all_results.keys())
+        if len(successful_chunks) <= 20:
+            print(f"\n  ✅ Successful Chunks: {successful_chunks}", flush=True)
+        else:
+            print(f"\n  ✅ Successful Chunks: {len(successful_chunks)} chunks", flush=True)
+            print(f"      └─ First 10: {successful_chunks[:10]}", flush=True)
+            print(f"      └─ Last 10: {successful_chunks[-10:]}", flush=True)
+    
+    # 실패한 청크 목록
+    if all_failed_requests:
+        failed_chunks = sorted(all_failed_requests)
+        print(f"\n  ❌ Failed Chunks: {failed_chunks}", flush=True)
+        print(f"      └─ All failed requests were retried {5} times each", flush=True)
+        print(f"      └─ Check error messages above for detailed failure reasons", flush=True)
+    
+    if not all_results:
+        print("\n  ⚠️  WARNING: No requests were successfully synthesized!", flush=True)
+        print(f"  📋 All {total_requests} requests were sent, but all failed after {5} retries each", flush=True)
+        raise Exception("All TTS synthesis attempts failed")
+
+    print("  " + "=" * 70 + "\n", flush=True)
+    
+    # 순서대로 정렬하여 오디오 세그먼트 생성
+    for i in sorted(all_results.keys()):
+        audio_data = all_results[i]
+        if PYDUB_AVAILABLE:
+            # 임시 파일에 저장
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+            try:
+                audio_segment = AudioSegment.from_mp3(tmp_path)
+                audio_segments.append(audio_segment)
+            except Exception as e:
+                log_error(f"Failed to load audio segment {i}: {e}", context="text_to_speech_from_chunks", exception=e)
+                print(f"    ⚠ Warning: Failed to load audio segment {i}: {e}", flush=True)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+        else:
+            # pydub가 없으면 첫 번째 청크만 저장
+            if i == 0:
+                with open(output_filename, 'wb') as f:
+                    f.write(audio_data)
+                print(f"  ✓ Audio saved (pydub not available, first chunk only): {output_filename}", flush=True)
+                return
+    
+    if not audio_segments:
+        print("  ✗ Error: No audio segments to merge", flush=True)
+        raise Exception("No audio segments were created")
+    
+    # 오디오 병합
+    if PYDUB_AVAILABLE:
+        print(f"\n  💾 Merging {len(audio_segments)} audio files...", flush=True)
+        # 300ms 침묵 추가
+        silence = AudioSegment.silent(duration=300)
+        combined = audio_segments[0]
+        for i, seg in enumerate(audio_segments[1:], 1):
+            combined += silence + seg
+            if (i + 1) % 5 == 0:
+                print(f"    Merged {i+1}/{len(audio_segments)} segments...", flush=True)
+        
+        # 파일 저장
+        try:
+            combined.export(output_filename, format="mp3")
+            file_size = os.path.getsize(output_filename)
+            duration_seconds = len(combined) / 1000.0
+            print(f"\n  ✨ Output Saved: {output_filename}", flush=True)
+        except Exception as e:
+            log_error(f"Failed to export audio file: {e}", context="text_to_speech_from_chunks", exception=e)
+            print(f"  ✗ Error: Failed to export audio file: {e}", flush=True)
+            raise
+    else:
+        print("  ⚠ Warning: pydub not available, cannot merge audio segments", flush=True)
+
+
+def sanitize_path_component(text: str) -> str:
+    """파일 경로에 사용할 수 없는 문자를 제거합니다."""
+    if not text:
+        return ""
+    
+    # Windows에서 사용할 수 없는 문자 제거
+    invalid_chars = r'[<>:"/\\|?*]'
+    sanitized = re.sub(invalid_chars, '_', text)
+    sanitized = sanitized.strip('. ')
+    return sanitized[:100]  # 길이 제한
+
+
+def prepare_output_directory(audio_title: str, voice_name: str, language_code: str, mode_label: str, narrative_mode: str = None) -> tuple[Path, str]:
+    """출력 디렉토리를 생성하고 경로를 반환합니다.
+    
+    Args:
+        audio_title: 오디오 제목 (영어)
+        voice_name: 음성 이름
+        language_code: 언어 코드 (ko-KR 또는 en-US)
+        mode_label: 모드 레이블 (한국어, 사용 안 함)
+        narrative_mode: 서사 모드 키 (mentor, friend, lover, radio_show)
+    
+    Returns:
+        (output_dir, folder_name) 튜플
+    """
+    title_safe = sanitize_path_component(audio_title)
+    voice_safe = sanitize_path_component(voice_name)
+    
+    # 모드 키를 영어로 변환 (narrative_mode가 없으면 mode_label에서 추출 시도)
+    if narrative_mode:
+        mode_key = narrative_mode
+    else:
+        # mode_label에서 키 추출 시도 (fallback)
+        mode_key = "mentor"  # 기본값
+    
+    # 언어 코드를 간단하게 변환 (ko-KR -> KO, en-US -> EN)
+    lang_short = "KO" if language_code.startswith("ko") else "EN"
+    
+    # 폴더명 형식: {title}_{mode}_{voice}_{lang}
+    folder_name = f"{title_safe}_{mode_key}_{voice_safe}_{lang_short}"
+    folder_name = folder_name[:200]  # 폴더명 길이 제한
+    
+    output_dir = OUTPUT_ROOT / folder_name
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    return output_dir, folder_name
+
+
+def build_output_paths(audio_title: str, voice_name: str, language_code: str, mode_label: str, narrative_mode: str = None) -> dict:
+    """출력 파일 경로들을 생성합니다.
+    
+    Args:
+        audio_title: 오디오 제목 (영어)
+        voice_name: 음성 이름
+        language_code: 언어 코드 (ko-KR 또는 en-US)
+        mode_label: 모드 레이블 (사용 안 함)
+        narrative_mode: 서사 모드 키 (mentor, friend, lover, radio_show)
+    
+    Returns:
+        출력 파일 경로 딕셔너리
+    """
+    output_dir, _ = prepare_output_directory(audio_title, voice_name, language_code, mode_label, narrative_mode)
+    
+    title_safe = sanitize_path_component(audio_title)
+    
+    # 모드 키와 언어 코드 추출
+    if narrative_mode:
+        mode_key = narrative_mode
+    else:
+        mode_key = "mentor"  # 기본값
+    
+    lang_short = "KO" if language_code.startswith("ko") else "EN"
+    voice_safe = sanitize_path_component(voice_name)
+    
+    # 오디오 파일명 형식: {title}_{mode}_{voice}_{lang}.mp3
+    audio_filename = f"{title_safe}_{mode_key}_{voice_safe}_{lang_short}.mp3"
+    
+    return {
+        "audio_file": output_dir / audio_filename,
+        "refined_text": output_dir / "refined_text.txt",
+        "audio_title": output_dir / "audio_title.txt",
+        "blueprint": output_dir / "showrunner_segments.json",
+    }
+
+
+def save_latest_run_path(output_dir: Path) -> None:
+    """최근 실행 출력 디렉토리 경로를 저장합니다."""
+    try:
+        with open(LATEST_RUN_MARKER, "w", encoding="utf-8") as f:
+            f.write(str(output_dir))
+    except Exception as e:
+        log_error(f"Failed to save latest run path: {e}", context="save_latest_run_path", exception=e)
+
+
+def parse_script_dialogues(script_text: str, narrative_mode: str, voice_profile: dict = None) -> list:
+    """
+    스크립트 텍스트를 파싱하여 화자별 대화 목록으로 변환합니다.
+    
+    Args:
+        script_text: 스크립트 텍스트
+        narrative_mode: 서사 모드 (mentor, friend, lover, radio_show)
+        voice_profile: 음성 프로필 딕셔너리
+        
+    Returns:
+        대화 목록 [{"speaker": "Host 1", "speaker_name": "Achernar", "text": "..."}]
+    """
+    dialogues = []
+    
+    if narrative_mode == "radio_show":
+        # 라디오쇼 모드: Host 1:, Host 2: 패턴으로 파싱
+        # 화자 이름 추출
+        host1_name = "Host 1"
+        host2_name = "Host 2"
+        
+        if voice_profile:
+            if isinstance(voice_profile, dict):
+                # 라디오쇼는 host1_voice, host2_voice를 가짐
+                host1_voice = voice_profile.get("host1_voice", {})
+                host2_voice = voice_profile.get("host2_voice", {})
+                
+                if isinstance(host1_voice, dict):
+                    host1_name = host1_voice.get("name", "Host 1")
+                elif isinstance(host1_voice, str):
+                    host1_name = host1_voice
+                    
+                if isinstance(host2_voice, dict):
+                    host2_name = host2_voice.get("name", "Host 2")
+                elif isinstance(host2_voice, str):
+                    host2_name = host2_voice
+        
+        # 스크립트를 Host 1: / Host 2: 패턴으로 분할
+        lines = script_text.split('\n')
+        current_speaker = None
+        current_text = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Host 1: 또는 Host 2: 패턴 감지
+            if line.startswith("Host 1:") or line.startswith("호스트 1:"):
+                # 이전 대화 저장
+                if current_speaker and current_text:
+                    dialogues.append({
+                        "speaker": current_speaker,
+                        "speaker_name": host1_name if current_speaker == "Host 1" else host2_name,
+                        "text": " ".join(current_text)
+                    })
+                current_speaker = "Host 1"
+                current_text = [line.split(":", 1)[1].strip() if ":" in line else ""]
+            elif line.startswith("Host 2:") or line.startswith("호스트 2:"):
+                # 이전 대화 저장
+                if current_speaker and current_text:
+                    dialogues.append({
+                        "speaker": current_speaker,
+                        "speaker_name": host1_name if current_speaker == "Host 1" else host2_name,
+                        "text": " ".join(current_text)
+                    })
+                current_speaker = "Host 2"
+                current_text = [line.split(":", 1)[1].strip() if ":" in line else ""]
+            else:
+                # 현재 화자의 대화에 추가
+                if current_speaker:
+                    current_text.append(line)
+        
+        # 마지막 대화 저장
+        if current_speaker and current_text:
+            dialogues.append({
+                "speaker": current_speaker,
+                "speaker_name": host1_name if current_speaker == "Host 1" else host2_name,
+                "text": " ".join(current_text)
+            })
+    
+    else:
+        # 다른 모드: 단일 화자
+        speaker_name = "Narrator"
+        if voice_profile:
+            if isinstance(voice_profile, dict):
+                speaker_name = voice_profile.get("name", "Narrator")
+            elif isinstance(voice_profile, str):
+                speaker_name = voice_profile
+        
+        # 전체 스크립트를 하나의 대화로
+        dialogues.append({
+            "speaker": "Narrator",
+            "speaker_name": speaker_name,
+            "text": script_text.strip()
+        })
+    
+    return dialogues

@@ -1,0 +1,40 @@
+# Core LangGraph and LangChain dependencies
+# LangGraph 1.0.4 supports Send API (location may vary)
+# Updated to support langgraph 1.0.4
+langgraph>=1.0.0
+langchain-core>=1.0.0
+# langchain-google-genai: version 0.0.1 works with langgraph 1.0.4
+# Note: langchain-google-genai 2.x may not be compatible with langgraph 1.0.4
+langchain-google-genai>=0.0.1
+
+# Google AI dependencies
+# google-generativeai: version 0.3.2 works with langgraph 1.0.4
+# Note: google-generativeai 0.8.x requires protobuf 5.x which may conflict
+google-generativeai>=0.3.0,<0.4.0
+
+# Protobuf - CRITICAL: langgraph 1.0.4 works with protobuf 4.x
+# opentelemetry-proto (dependency of langgraph 1.0.4) may work with protobuf 4.x
+# If conflicts occur, we'll install compatible versions individually
+protobuf>=4.0.0,<7.0.0
+
+# Google Cloud TTS
+google-cloud-texttospeech>=2.0.0
+
+# Audio processing
+pydub>=0.25.1
+
+# Environment management
+python-dotenv>=1.0.0
+appdirs>=1.4.4
+
+# Web Server (FastAPI)
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# GUI (optional, for API key configuration)
+# tkinter is usually included with Python on Windows
+
+# Note: opentelemetry-proto will be installed as a dependency of langgraph
+# It requires protobuf>=5.0,<7.0 which we've specified above
+# This resolves the dependency conflict between opentelemetry-proto and google-generativeai

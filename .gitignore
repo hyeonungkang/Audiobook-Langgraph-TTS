@@ -1,0 +1,108 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.venv/
+env/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# Config & Environment
+config.json
+.env
+.env.local
+.env.*
+!.env.example
+*.json
+!package.json
+!package-lock.json
+!tsconfig*.json
+!eslint.config.js
+!postcss.config.js
+!tailwind.config.js
+!vite.config.ts
+
+# Build artifacts
+backend_dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Logs and temporary files
+logs/
+*.log
+build_log.txt
+error_log.txt
+latest_run_path.txt
+electron/build_electron_log.txt
+
+# Audio files (generated outputs)
+*.wav
+*.mp3
+*.ogg
+intro.wav
+
+# Sensitive information (GCP keys, credentials)
+*service-account*.json
+*credentials*.json
+loyal-operation-*.json
+*-e610e3f55565.json
+
+# Electron build outputs
+electron/dist/
+
+# Temporary files
+*.tmp
+*.bak
+*~
+.DS_Store
+Thumbs.db
+
+# Output directories (generated files)
+outputs/
+temp_output/
+backend_dist/
+
+# Frontend (not needed for CLI usage)
+frontend/
+electron/
+
+# Build artifacts
+build/
+dist/
+*.spec
+build_*.py
+build_*.spec
+
+# Test and debug files
+test_*.py
+debug_*.py
+check_*.py
+verify_*.py
+pyproject.toml
+
+# API Keys and credentials
+*service-account*.json
+*credentials*.json
+loyal-operation-*.json
+*-e610e3f55565.json
+GOOGLE_API_KEY
+GOOGLE_APPLICATION_CREDENTIALS
+
+# Exception: Keep these important files
+!requirements.txt
+!input.txt
+!README.md
+!main.py
+!.env.example
