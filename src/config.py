@@ -68,7 +68,7 @@ def load_config():
         # 설정 파일이 없으면 기본값으로 생성
         print(f"ℹ Config file not found at {CONFIG_PATH}, creating with defaults", flush=True)
         config = {
-            "USER_NAME": "용사",
+            "USER_NAME": "현웅",
             "MODEL_NAME": "gemini-2.5-pro"
         }
         # 기본 설정 저장 시도
@@ -79,7 +79,7 @@ def load_config():
     
     # 기본값 확인
     if "USER_NAME" not in config:
-        config["USER_NAME"] = "용사"
+        config["USER_NAME"] = "현웅"
     if "MODEL_NAME" not in config:
         config["MODEL_NAME"] = "gemini-2.5-pro"
         

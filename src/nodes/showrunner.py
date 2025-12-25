@@ -36,7 +36,7 @@ def showrunner_node(state: AgentState) -> AgentState:
         original_text = state["original_text"]
         config = state["config"]
         language = config.get("language", "ko")
-        listener_name = config.get("listener_name", "용사")
+        listener_name = config.get("listener_name", "현웅")
         narrative_mode = config.get("narrative_mode", "mentor")
         content_category = config.get("content_category", "research_paper")
         

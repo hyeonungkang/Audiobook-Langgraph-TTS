@@ -184,7 +184,7 @@ def main():
     print("\n" + "="*70, flush=True)
     print("6️⃣  청취자 이름 입력", flush=True)
     print("="*70, flush=True)
-    listener_name = prompt_listener_name(default_name="용사")
+    listener_name = prompt_listener_name(default_name="현웅")
     listener_names = get_listener_names(listener_name)
     listener_suffix = listener_names["suffix"]
     listener_base = listener_names["base"]

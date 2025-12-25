@@ -46,6 +46,7 @@ build_log.txt
 error_log.txt
 latest_run_path.txt
 electron/build_electron_log.txt
+input.txt
 
 # Audio files (generated outputs)
 *.wav

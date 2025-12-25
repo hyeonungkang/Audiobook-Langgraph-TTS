@@ -43,7 +43,7 @@ def writer_map_node(state: AgentState) -> AgentState:
     
     original_text = state.get("original_text", "")
     language = config.get("language", "ko")
-    listener_name = config.get("listener_name", "용사")
+    listener_name = config.get("listener_name", "현웅")
     narrative_mode = config.get("narrative_mode", "mentor")
     voice_profile = config.get("voice_profile")
     content_category = config.get("content_category", "research_paper")
@@ -264,7 +264,7 @@ def writer_worker_node(segment: dict) -> dict:
         # 실제로는 State에서 가져와야 함
         original_text = segment.get("_original_text", "")
         language = segment.get("_language", "ko")
-        listener_name = segment.get("_listener_name", "용사")
+        listener_name = segment.get("_listener_name", "현웅")
         narrative_mode = segment.get("_narrative_mode", "mentor")
         voice_profile = segment.get("_voice_profile")
         
