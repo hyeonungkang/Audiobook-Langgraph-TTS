@@ -189,7 +189,7 @@ def prompt_api_key_input() -> str:
     print("="*70)
     print("\n📋 API 키를 아직 설정하지 않으셨습니다.")
     print("\n💡 API 키 형식: AIza로 시작하는 39자 문자열")
-    print("   예시: AIzaSyDaGmWKa4JsXZ-HjGw7ISLn55QdikrYKj0")
+    print("   예시:  AIza********************kYKj0 (39자)")
     print("\n🌐 API 키 생성 방법:")
     print("   1. https://makersuite.google.com/app/apikey 방문")
     print("   2. 'Create API Key' 클릭")
