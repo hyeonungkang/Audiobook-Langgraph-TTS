@@ -46,6 +46,9 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         mode = DEFAULT_NARRATIVE_MODE
     config["narrative_mode"] = mode
     
+    # 4-1. 라디오쇼 멀티스피커 단일요청 옵션 (기본 True: Vertex 스타일 단일 요청)
+    config["radio_show_single_request"] = bool(config.get("radio_show_single_request", True))
+    
     # 5. 음성 프로필 구성 (가장 중요)
     voice_profile = {}
     
@@ -83,7 +86,7 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         
     config["voice_profile"] = voice_profile
     
-    # 6. 모델 이름 매핑 (gemini_model 키 사용)
+    # 6. 모델 이름 매핑 (gemini_model / tts_model_name)
     # 프론트엔드에서 model_name 또는 gemini_model 모두 지원
     if "model_name" in config:
         config["gemini_model"] = config["model_name"]
@@ -91,7 +94,11 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         # 이미 gemini_model로 온 경우 그대로 사용
         pass
     else:
-        config["gemini_model"] = "gemini-2.5-pro"
+        config["gemini_model"] = "gemini-2.5-flash-lite"
+    
+    # TTS 모델 기본값: flash-tts (멀티스피커 지원)
+    if "tts_model_name" not in config:
+        config["tts_model_name"] = "gemini-2.5-flash-tts"
         
     return config
 

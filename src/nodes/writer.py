@@ -11,6 +11,7 @@ from ..utils import (
     generate_content_with_retry,
     extract_relevant_sections,
     build_writer_prompt,
+    ensure_radio_dialogue,
     log_error,
     log_workflow_step_start,
     log_workflow_step_end
@@ -50,7 +51,7 @@ def writer_map_node(state: AgentState) -> AgentState:
     # ✅ 요구사항: Flash(또는 사용자 선택 모델)는 writer에만 적용
     # - frontend/CLI에서 넘어오는 gemini_model(=model 선택)을 writer 모델로 취급
     # - 필요 시 gemini_model_writer로 별도 지정 가능
-    gemini_model = config.get("gemini_model_writer") or config.get("gemini_model") or "gemini-2.5-flash"
+    gemini_model = config.get("gemini_model_writer") or config.get("gemini_model") or "gemini-2.5-flash-lite"
     
     print(f"Writer Map: Processing {len(segments)} segments in parallel...", flush=True)
     
@@ -74,6 +75,9 @@ def writer_map_node(state: AgentState) -> AgentState:
                 content_category=content_category,
                 gemini_model=gemini_model
             )
+            # 라디오쇼 모드에서 Host 라벨이 없으면 자동 교대 라벨 부여
+            if narrative_mode == "radio_show":
+                script = ensure_radio_dialogue(script, language)
             
             print(f"  Writer {segment_id}: Completed", flush=True)
             return {

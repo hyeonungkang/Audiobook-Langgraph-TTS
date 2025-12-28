@@ -69,7 +69,7 @@ def load_config():
         print(f"ℹ Config file not found at {CONFIG_PATH}, creating with defaults", flush=True)
         config = {
             "USER_NAME": "현웅",
-            "MODEL_NAME": "gemini-2.5-pro"
+            "MODEL_NAME": "gemini-2.5-flash-lite"
         }
         # 기본 설정 저장 시도
         try:
@@ -81,7 +81,7 @@ def load_config():
     if "USER_NAME" not in config:
         config["USER_NAME"] = "현웅"
     if "MODEL_NAME" not in config:
-        config["MODEL_NAME"] = "gemini-2.5-pro"
+        config["MODEL_NAME"] = "gemini-2.5-flash-lite"
         
     return config
 
@@ -218,6 +218,56 @@ def prompt_api_key_input() -> str:
         return api_key
 
 
+def prompt_service_account_key_input() -> str:
+    """
+    CLI에서 서비스 계정 키 파일 경로 입력받기
+    """
+    print("\n" + "="*70)
+    print("🔐 Google Cloud Service Account Key Required (TTS용)")
+    print("="*70)
+    print("\n📋 서비스 계정 키 파일을 아직 설정하지 않으셨습니다.")
+    print("\n💡 서비스 계정 키 파일:")
+    print("   - JSON 형식의 키 파일 경로를 입력하세요")
+    print("   - 예시: C:/path/to/your-service-account-key.json")
+    print("   - 또는 프로젝트 루트 기준 상대 경로: service-account-key.json")
+    print("\n🌐 서비스 계정 키 생성 방법:")
+    print("   1. Google Cloud Console (https://console.cloud.google.com) 방문")
+    print("   2. IAM & Admin > Service Accounts 메뉴")
+    print("   3. 서비스 계정 생성 또는 기존 계정 선택")
+    print("   4. Keys 탭 > Add Key > Create new key > JSON 선택")
+    print("   5. 다운로드된 JSON 파일 경로를 입력")
+    print("\n" + "="*70)
+    
+    while True:
+        key_path = input("\n📁 Service Account Key 파일 경로를 입력하세요 (또는 Enter로 건너뛰기): ").strip()
+        
+        if not key_path:
+            print("⚠️  서비스 계정 키를 건너뜁니다. TTS 기능이 작동하지 않을 수 있습니다.")
+            return ""
+        
+        # 경로 검증
+        if not os.path.isabs(key_path):
+            # 상대 경로인 경우 프로젝트 루트 기준으로 변환
+            full_path = application_path / key_path
+        else:
+            full_path = Path(key_path)
+        
+        if not full_path.exists():
+            print(f"❌ 파일을 찾을 수 없습니다: {full_path}")
+            confirm = input("   그래도 계속하시겠습니까? (y/n): ").lower()
+            if confirm != 'y':
+                continue
+        
+        # JSON 파일인지 확인
+        if not str(full_path).lower().endswith('.json'):
+            print("⚠️  경고: 일반적으로 서비스 계정 키는 .json 파일입니다.")
+            confirm = input("   그래도 계속하시겠습니까? (y/n): ").lower()
+            if confirm != 'y':
+                continue
+        
+        return str(full_path)
+
+
 def save_env_file(key: str, value: str):
     """
     .env 파일에 환경 변수 저장 (한국어 주석 제거, 값만 저장)
@@ -297,22 +347,22 @@ def initialize_api_keys():
     GOOGLE_API_KEY = None
     if env_path.exists():
         try:
-            # .env 파일 직접 읽기 (한국어 주석 문제 방지)
-            with open(env_path, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    line = line.strip()
-                    # 주석 제거
-                    if '#' in line:
-                        line = line.split('#')[0].strip()
-                    # KEY=value 형식만 처리
-                    if line and '=' in line and line.startswith('GOOGLE_API_KEY='):
-                        GOOGLE_API_KEY = line.split('=', 1)[1].strip()
-                        break
+            # dotenv로 먼저 로드 (표준 방식)
+            load_dotenv(env_path)
+            GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
             
-            # dotenv로도 시도 (fallback)
+            # .env 파일 직접 읽기 (한국어 주석 문제 방지, fallback)
             if not GOOGLE_API_KEY:
-                load_dotenv(env_path)
-                GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+                with open(env_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        line = line.strip()
+                        # 주석 제거
+                        if '#' in line:
+                            line = line.split('#')[0].strip()
+                        # KEY=value 형식만 처리
+                        if line and '=' in line and line.startswith('GOOGLE_API_KEY='):
+                            GOOGLE_API_KEY = line.split('=', 1)[1].strip()
+                            break
             
             if GOOGLE_API_KEY:
                 _log("src/config.py:262", "API key loaded from .env", {}, "C")
@@ -356,7 +406,6 @@ def initialize_api_keys():
         except Exception as e:
             _log("src/config.py:278", "prompt_api_key_input() failed", {"error": str(e), "type": type(e).__name__}, "C")
             raise
-        
         # 입력받은 API 키를 .env 파일에 저장 (표준 방식)
         _log("src/config.py:282", "Saving API key to .env file", {}, "C")
         print("\n💾 Saving API key to .env file...", flush=True)
@@ -378,7 +427,6 @@ def initialize_api_keys():
     # ✅ API 키를 현재 프로세스 환경 변수에 설정 (global)
     _log("src/config.py:300", "Setting os.environ['GOOGLE_API_KEY']", {}, "C")
     os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
-    print(f"\n✓ GOOGLE_API_KEY set: {GOOGLE_API_KEY[:10]}... (showing first 10 chars)", flush=True)
     
     # Gemini API 초기화
     # 타임아웃은 generate_content_with_retry 함수에서 처리됨
@@ -393,17 +441,48 @@ def initialize_api_keys():
         raise
     
     # 서비스 계정 키 파일 (TTS용)
-    # .env 파일에서 먼저 확인
+    # 1. .env 파일에서 먼저 확인
     GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    
+    # 2. config.json에서 확인 (백업용, 하위 호환성)
     if not GOOGLE_APPLICATION_CREDENTIALS:
-        # config.json에서 확인 (백업용)
         try:
             config = load_config()
             GOOGLE_APPLICATION_CREDENTIALS = config.get("GOOGLE_APPLICATION_CREDENTIALS") or ""
+            # config.json에서 가져온 경우 .env로 마이그레이션
+            if GOOGLE_APPLICATION_CREDENTIALS:
+                print("💡 Migrating service account key from config.json to .env file...", flush=True)
+                save_env_file("GOOGLE_APPLICATION_CREDENTIALS", GOOGLE_APPLICATION_CREDENTIALS)
         except:
             GOOGLE_APPLICATION_CREDENTIALS = ""
     
+    # 3. 서비스 계정 키가 없으면 사용자 입력 받기
+    if not GOOGLE_APPLICATION_CREDENTIALS:
+        _log("src/config.py:service_account", "No service account key found, prompting user", {}, "C")
+        print("✗ No service account key found in any configuration", flush=True)
+        print("💡 Starting interactive service account key setup...", flush=True)
+        
+        try:
+            GOOGLE_APPLICATION_CREDENTIALS = prompt_service_account_key_input()
+            _log("src/config.py:service_account", "User provided service account key", {"key_length": len(GOOGLE_APPLICATION_CREDENTIALS) if GOOGLE_APPLICATION_CREDENTIALS else 0}, "C")
+            
+            # 입력받은 키를 .env 파일에 저장
+            if GOOGLE_APPLICATION_CREDENTIALS:
+                _log("src/config.py:service_account", "Saving service account key to .env file", {}, "C")
+                print("\n💾 Saving service account key to .env file...", flush=True)
+                try:
+                    save_env_file("GOOGLE_APPLICATION_CREDENTIALS", GOOGLE_APPLICATION_CREDENTIALS)
+                    _log("src/config.py:service_account", "save_env_file() succeeded", {}, "C")
+                except Exception as e:
+                    _log("src/config.py:service_account", "save_env_file() failed", {"error": str(e)}, "C")
+                    print(f"⚠️  Failed to save to .env: {e}", flush=True)
+        except Exception as e:
+            _log("src/config.py:service_account", "prompt_service_account_key_input() failed", {"error": str(e), "type": type(e).__name__}, "C")
+            print(f"⚠️  Failed to get service account key: {e}", flush=True)
+            GOOGLE_APPLICATION_CREDENTIALS = ""
+    
     if GOOGLE_APPLICATION_CREDENTIALS:
+        # 상대 경로인 경우 절대 경로로 변환
         if not os.path.isabs(GOOGLE_APPLICATION_CREDENTIALS):
             key_path = application_path / GOOGLE_APPLICATION_CREDENTIALS
             GOOGLE_APPLICATION_CREDENTIALS = str(key_path)

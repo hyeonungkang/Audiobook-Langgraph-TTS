@@ -6,6 +6,8 @@ from datetime import datetime
 from ..state import AgentState
 from ..utils import (
     text_to_speech_from_chunks,
+    text_to_speech_radio_show,
+    text_to_speech_radio_show_structured,
     chunk_text_for_tts,
     parse_radio_show_dialogue,
     merge_dialogue_chunks,
@@ -39,6 +41,7 @@ def tts_generator_node(state: AgentState) -> AgentState:
         language = config.get("language", "ko")
         narrative_mode = config.get("narrative_mode", "mentor")
         voice_profile = config.get("voice_profile")
+        radio_single_request = config.get("radio_show_single_request", True)
         
         if not scripts:
             print("  ⚠ Warning: No scripts to process", flush=True)
@@ -66,8 +69,9 @@ def tts_generator_node(state: AgentState) -> AgentState:
         for script_data in scripts_sorted:
             script_text = script_data.get("script", "").strip()
             if script_text:
-                # SSML 태그 제거
-                script_text = remove_ssml_tags(script_text)
+                # SSML 제거는 단일 화자용. 라디오쇼에서는 원본 라벨/마크업을 보존.
+                if narrative_mode != "radio_show":
+                    script_text = remove_ssml_tags(script_text)
                 full_text += script_text + "\n\n"
                 valid_scripts_count += 1
         
@@ -90,78 +94,85 @@ def tts_generator_node(state: AgentState) -> AgentState:
         mode_profile = get_mode_profile(narrative_mode)
         tts_prompt = get_tts_prompt_for_mode(mode_profile, language)
         
-        # 텍스트 청킹
-        print(f"\nTTS: Chunking {len(scripts_sorted)} scripts for TTS...", flush=True)
-        audio_chunks = chunk_text_for_tts(full_text, language=language, tts_prompt=tts_prompt)
-        
-        if not audio_chunks:
-            print("  ⚠ Warning: No audio chunks generated from text", flush=True)
-            print(f"  Debug: full_text length = {len(full_text)}, tts_prompt length = {len(tts_prompt)}", flush=True)
-            error_info = {
-                "node_name": "tts_generator",
-                "error_message": "No audio chunks generated",
-                "segment_id": None
-            }
-            state["errors"].append(error_info)
-            return state
-        
-        state["audio_chunks"] = audio_chunks
-        print(f"  ✓ Generated {len(audio_chunks)} audio chunks", flush=True)
-        
-        # 즉시 임시 파일로 저장 (청킹 결과)
-        try:
-            temp_dir = Path(__file__).parent.parent.parent / "temp_output"
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            temp_file = temp_dir / f"tts_chunks_{timestamp}.txt"
+        if narrative_mode == "radio_show":
+            # 라디오쇼: 두 화자의 대화를 분리 후 화자별 음성으로 합성
+            print(f"\nTTS: Radio show mode detected. Parsing dialogues...", flush=True)
+            dialogues = parse_radio_show_dialogue(full_text)
+            dialogues = merge_dialogue_chunks(dialogues)
             
-            with open(temp_file, "w", encoding="utf-8") as f:
-                f.write(f"Total chunks: {len(audio_chunks)}\n")
-                f.write("=" * 70 + "\n\n")
-                for i, chunk in enumerate(audio_chunks):
-                    f.write(f"[Chunk {i+1}/{len(audio_chunks)}]\n")
-                    f.write(f"Length: {len(chunk)} chars\n")
-                    f.write("-" * 70 + "\n")
-                    f.write(chunk)
-                    f.write("\n\n" + "=" * 70 + "\n\n")
-            print(f"  ✓ TTS chunks saved to temp file: {temp_file}", flush=True)
-        except Exception as e:
-            log_error(f"Failed to save TTS chunks to temp file: {e}", context="tts_generator_node", exception=e)
-            print(f"  ⚠ Warning: Failed to save TTS chunks to temp file: {e}", flush=True)
-        
-        # TTS 변환을 위한 임시 파일 경로 생성
-        audio_title = state.get("audio_title", "output")
-        voice_name = voice_profile.get("name", "Achernar") if voice_profile else "Achernar"
-        language_code = "ko-KR" if language == "ko" else "en-US"
-        
-        # 모드 키와 언어 코드를 간단하게 변환
-        mode_key = narrative_mode  # 영어 키 사용 (mentor, friend, lover, radio_show)
-        lang_short = "KO" if language == "ko" else "EN"
-        
-        # 파일명 형식: {title}_{mode}_{voice}_{lang}.mp3
-        title_safe = sanitize_path_component(audio_title)
-        voice_safe = sanitize_path_component(voice_name)
-        
-        output_filename = f"{title_safe}_{mode_key}_{voice_safe}_{lang_short}.mp3"
-        temp_output_path = Path(__file__).parent.parent.parent / "temp_output" / output_filename
-        temp_output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # TTS 변환 실행
-        print(f"\nTTS: Converting {len(audio_chunks)} chunks to speech...", flush=True)
-        print(f"  Output path: {temp_output_path}", flush=True)
-        print(f"  Voice profile: {voice_profile}", flush=True)
-        print(f"  Language: {language}", flush=True)
-        
-        try:
-            text_to_speech_from_chunks(
-                text_chunks=audio_chunks,
-                output_filename=str(temp_output_path),
-                voice_profile=voice_profile,
-                language=language,
-                tts_prompt=tts_prompt
-            )
+            if not dialogues:
+                # 1차 파싱 실패 시, 단순 라인 단위 교대 생성 시도 (Fallback)
+                print("  ⚠ Warning: No dialogue found. Applying fallback alternating Host 1/2...", flush=True)
+                lines = [ln.strip() for ln in full_text.split("\n") if ln.strip()]
+                alt_dialogues = []
+                current_speaker = 1
+                for ln in lines:
+                    alt_dialogues.append({"speaker": current_speaker, "text": ln})
+                    current_speaker = 2 if current_speaker == 1 else 1
+                dialogues = alt_dialogues
             
-            # 생성된 오디오 파일 확인
+            # 최종적으로도 비어 있으면 중단
+            if not dialogues:
+                print("  ✗ Error: Radio show dialog parsing failed (empty).", flush=True)
+                error_info = {
+                    "node_name": "tts_generator",
+                    "error_message": "Radio show mode: No dialogue extracted",
+                    "segment_id": None
+                }
+                state["errors"].append(error_info)
+                return state
+            
+            host1 = voice_profile.get("host1") if isinstance(voice_profile, dict) else None
+            host2 = voice_profile.get("host2") if isinstance(voice_profile, dict) else None
+            if not host1 or not host2:
+                print("  ⚠ Warning: host1/host2 voice profiles are missing", flush=True)
+                error_info = {
+                    "node_name": "tts_generator",
+                    "error_message": "Radio show mode: host1/host2 profiles required",
+                    "segment_id": None
+                }
+                state["errors"].append(error_info)
+                return state
+            
+            audio_title = state.get("audio_title", "output")
+            # 파일명에 두 화자 이름 포함
+            voice_name = f"{host1.get('name', 'Host1')}-{host2.get('name', 'Host2')}"
+            mode_key = narrative_mode
+            lang_short = "KO" if language == "ko" else "EN"
+            title_safe = sanitize_path_component(audio_title)
+            voice_safe = sanitize_path_component(voice_name)
+            temp_output_path = Path(__file__).parent.parent.parent / "temp_output" / f"{title_safe}_{mode_key}_{voice_safe}_{lang_short}.mp3"
+            temp_output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            print(f"\nTTS: Converting {len(dialogues)} dialogues (radio show)...", flush=True)
+            print(f"  Output path: {temp_output_path}", flush=True)
+            print(f"  Voice profile: host1={host1}, host2={host2}", flush=True)
+            
+            if radio_single_request:
+                # 구조적 배치 청킹 후 멀티스피커 합성 (안정성 우선)
+                rep_voice = host1.get("name") if isinstance(host1, dict) else None
+                host1_name = host1.get("name") if isinstance(host1, dict) else None
+                host2_name = host2.get("name") if isinstance(host2, dict) else None
+                text_to_speech_radio_show_structured(
+                    dialogues=dialogues,
+                    output_filename=str(temp_output_path),
+                    language=language,
+                    tts_prompt=tts_prompt,
+                    model_name=config.get("tts_model_name", "gemini-2.5-flash-tts"),
+                    representative_voice=rep_voice,
+                    host1_voice=host1_name,
+                    host2_voice=host2_name
+                )
+            else:
+                # 화자별 개별 합성 후 병합 (기존 안전 경로)
+                text_to_speech_radio_show(
+                    dialogues=dialogues,
+                    output_filename=str(temp_output_path),
+                    voice_profile=voice_profile,
+                    language=language,
+                    tts_prompt=tts_prompt
+                )
+            
             if not temp_output_path.exists():
                 print(f"  ⚠ Warning: Audio file was not created: {temp_output_path}", flush=True)
                 error_info = {
@@ -173,27 +184,117 @@ def tts_generator_node(state: AgentState) -> AgentState:
                 return state
             
             file_size = temp_output_path.stat().st_size
-            print(f"  ✓ Audio file created: {temp_output_path} ({file_size} bytes)", flush=True)
-            
-            # 생성된 오디오 파일 경로 저장
+            print(f"  ✓ Radio show audio created: {temp_output_path} ({file_size} bytes)", flush=True)
             state["audio_paths"] = [str(temp_output_path)]
             state["final_audio_path"] = str(temp_output_path)
-            
-            # 워크플로우 타이밍 완료
             duration = log_workflow_step_end("tts_generator", start_time)
-            print(f"TTS completed: {output_filename} (Duration: {duration:.1f}s)", flush=True)
-        except Exception as e:
-            error_info = {
-                "node_name": "tts_generator",
-                "error_message": f"TTS conversion failed: {str(e)}",
-                "segment_id": None
-            }
-            state["errors"].append(error_info)
-            log_error(f"TTS conversion failed: {e}", context="tts_generator_node", exception=e)
-            print(f"  ✗ TTS conversion failed: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            return state
+            print(f"TTS completed: {temp_output_path.name} (Duration: {duration:.1f}s)", flush=True)
+        
+        else:
+            # 단일 화자 모드 (기존 로직)
+            print(f"\nTTS: Chunking {len(scripts_sorted)} scripts for TTS...", flush=True)
+            audio_chunks = chunk_text_for_tts(full_text, language=language, tts_prompt=tts_prompt)
+            
+            if not audio_chunks:
+                print("  ⚠ Warning: No audio chunks generated from text", flush=True)
+                print(f"  Debug: full_text length = {len(full_text)}, tts_prompt length = {len(tts_prompt)}", flush=True)
+                error_info = {
+                    "node_name": "tts_generator",
+                    "error_message": "No audio chunks generated",
+                    "segment_id": None
+                }
+                state["errors"].append(error_info)
+                return state
+            
+            state["audio_chunks"] = audio_chunks
+            print(f"  ✓ Generated {len(audio_chunks)} audio chunks", flush=True)
+            
+            # 즉시 임시 파일로 저장 (청킹 결과)
+            try:
+                temp_dir = Path(__file__).parent.parent.parent / "temp_output"
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                temp_file = temp_dir / f"tts_chunks_{timestamp}.txt"
+                
+                with open(temp_file, "w", encoding="utf-8") as f:
+                    f.write(f"Total chunks: {len(audio_chunks)}\n")
+                    f.write("=" * 70 + "\n\n")
+                    for i, chunk in enumerate(audio_chunks):
+                        f.write(f"[Chunk {i+1}/{len(audio_chunks)}]\n")
+                        f.write(f"Length: {len(chunk)} chars\n")
+                        f.write("-" * 70 + "\n")
+                        f.write(chunk)
+                        f.write("\n\n" + "=" * 70 + "\n\n")
+                print(f"  ✓ TTS chunks saved to temp file: {temp_file}", flush=True)
+            except Exception as e:
+                log_error(f"Failed to save TTS chunks to temp file: {e}", context="tts_generator_node", exception=e)
+                print(f"  ⚠ Warning: Failed to save TTS chunks to temp file: {e}", flush=True)
+            
+            # TTS 변환을 위한 임시 파일 경로 생성
+            audio_title = state.get("audio_title", "output")
+            voice_name = voice_profile.get("name", "Achernar") if voice_profile else "Achernar"
+            language_code = "ko-KR" if language == "ko" else "en-US"
+            
+            # 모드 키와 언어 코드를 간단하게 변환
+            mode_key = narrative_mode  # 영어 키 사용 (mentor, friend, lover, radio_show)
+            lang_short = "KO" if language == "ko" else "EN"
+            
+            # 파일명 형식: {title}_{mode}_{voice}_{lang}.mp3
+            title_safe = sanitize_path_component(audio_title)
+            voice_safe = sanitize_path_component(voice_name)
+            
+            output_filename = f"{title_safe}_{mode_key}_{voice_safe}_{lang_short}.mp3"
+            temp_output_path = Path(__file__).parent.parent.parent / "temp_output" / output_filename
+            temp_output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # TTS 변환 실행
+            print(f"\nTTS: Converting {len(audio_chunks)} chunks to speech...", flush=True)
+            print(f"  Output path: {temp_output_path}", flush=True)
+            print(f"  Voice profile: {voice_profile}", flush=True)
+            print(f"  Language: {language}", flush=True)
+            
+            try:
+                text_to_speech_from_chunks(
+                    text_chunks=audio_chunks,
+                    output_filename=str(temp_output_path),
+                    voice_profile=voice_profile,
+                    language=language,
+                    tts_prompt=tts_prompt
+                )
+                
+                # 생성된 오디오 파일 확인
+                if not temp_output_path.exists():
+                    print(f"  ⚠ Warning: Audio file was not created: {temp_output_path}", flush=True)
+                    error_info = {
+                        "node_name": "tts_generator",
+                        "error_message": f"Audio file not created: {temp_output_path}",
+                        "segment_id": None
+                    }
+                    state["errors"].append(error_info)
+                    return state
+                
+                file_size = temp_output_path.stat().st_size
+                print(f"  ✓ Audio file created: {temp_output_path} ({file_size} bytes)", flush=True)
+                
+                # 생성된 오디오 파일 경로 저장
+                state["audio_paths"] = [str(temp_output_path)]
+                state["final_audio_path"] = str(temp_output_path)
+                
+                # 워크플로우 타이밍 완료
+                duration = log_workflow_step_end("tts_generator", start_time)
+                print(f"TTS completed: {output_filename} (Duration: {duration:.1f}s)", flush=True)
+            except Exception as e:
+                error_info = {
+                    "node_name": "tts_generator",
+                    "error_message": f"TTS conversion failed: {str(e)}",
+                    "segment_id": None
+                }
+                state["errors"].append(error_info)
+                log_error(f"TTS conversion failed: {e}", context="tts_generator_node", exception=e)
+                print(f"  ✗ TTS conversion failed: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
+                return state
         
         return state
         

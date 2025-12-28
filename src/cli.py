@@ -245,42 +245,56 @@ def select_radio_show_hosts(language: str = "ko"):
     """
     group_keys = list(VOICE_BANKS.keys())
     
-    def select_host_voice(host_number: int, host_label: str):
-        """개별 화자 음성 선택 헬퍼 함수"""
+    def select_host_voice(host_number: int, host_label: str, default_group: str = None):
+        """개별 화자 음성 선택 헬퍼 함수
+        
+        Args:
+            host_number: 호스트 번호 (1 또는 2)
+            host_label: 호스트 레이블
+            default_group: 기본 그룹 키 (None이면 host_number에 따라 자동 설정)
+        """
+        # 기본 그룹 설정: host1은 female, host2는 male
+        if default_group is None:
+            default_group = "female" if host_number == 1 else "male"
+        
+        # 그룹 목록을 기본 그룹이 첫 번째가 되도록 재정렬
+        display_groups = [default_group] + [k for k in group_keys if k != default_group]
+        
         host_icon = "1️⃣" if host_number == 1 else "2️⃣"
         print(f"\n{host_icon} {host_label} 음성 선택", flush=True)
         print("=" * 70, flush=True)
         print("\n📌 음성 그룹을 선택하세요.", flush=True)
         print("\nAvailable Voice Groups:", flush=True)
         print("-" * 70, flush=True)
-        for idx, key in enumerate(group_keys, 1):
+        for idx, key in enumerate(display_groups, 1):
             bank = VOICE_BANKS[key]
             desc = bank.get("description", "")
             gender_icon = "👩" if key == "female" else "👨"
-            print(f"  {gender_icon} {idx:>2}. {bank['label']} - {desc}", flush=True)
+            default_marker = " (기본값)" if key == default_group else ""
+            print(f"  {gender_icon} {idx:>2}. {bank['label']} - {desc}{default_marker}", flush=True)
         print("-" * 70, flush=True)
-        print(f"  💡 팁: Enter 키를 누르면 기본값({VOICE_BANKS[group_keys[0]]['label']})이 선택됩니다.", flush=True)
+        print(f"  💡 팁: Enter 키를 누르면 기본값({VOICE_BANKS[default_group]['label']})이 선택됩니다.", flush=True)
         print("=" * 70, flush=True)
 
         # 그룹 선택
         while True:
             try:
                 group_choice = input(
-                    f"\n👉 {host_label}의 음성 그룹을 선택하세요 (1-{len(group_keys)}, 또는 Enter): "
+                    f"\n👉 {host_label}의 음성 그룹을 선택하세요 (1-{len(display_groups)}, 또는 Enter): "
                 ).strip()
                 if not group_choice:
-                    selected_group = group_keys[0]
+                    selected_group = default_group
                     print(f"  ✓ 기본값 선택: {VOICE_BANKS[selected_group]['label']}", flush=True)
                     break
                 if group_choice.isdigit():
                     idx = int(group_choice) - 1
-                    if 0 <= idx < len(group_keys):
-                        selected_group = group_keys[idx]
+                    if 0 <= idx < len(display_groups):
+                        selected_group = display_groups[idx]
                         print(f"  ✓ 선택됨: {VOICE_BANKS[selected_group]['label']}", flush=True)
                         break
-                print(f"  ✗ 잘못된 입력입니다. 1부터 {len(group_keys)} 사이의 숫자를 입력하세요.", flush=True)
+                print(f"  ✗ 잘못된 입력입니다. 1부터 {len(display_groups)} 사이의 숫자를 입력하세요.", flush=True)
             except (KeyboardInterrupt, EOFError):
-                selected_group = group_keys[0]
+                selected_group = default_group
                 print(f"\n  ✓ 기본값 선택: {VOICE_BANKS[selected_group]['label']}", flush=True)
                 break
 
@@ -343,11 +357,11 @@ def select_radio_show_hosts(language: str = "ko"):
         )
         return profile
     
-    # 첫 번째 화자 선택
-    host1_profile = select_host_voice(1, "First Host (첫 번째 화자)")
+    # 첫 번째 화자 선택 (기본값: 여성)
+    host1_profile = select_host_voice(1, "First Host (첫 번째 화자)", default_group="female")
     
-    # 두 번째 화자 선택
-    host2_profile = select_host_voice(2, "Second Host (두 번째 화자)")
+    # 두 번째 화자 선택 (기본값: 남성)
+    host2_profile = select_host_voice(2, "Second Host (두 번째 화자)", default_group="male")
     
     return (host1_profile, host2_profile)
 
@@ -357,9 +371,15 @@ def select_gemini_model():
     사용자로부터 Gemini 모델을 선택받습니다.
     
     Returns:
-        선택된 모델 이름 (str) - "gemini-2.5-pro" 또는 "gemini-2.5-flash"
+        선택된 모델 이름 (str) - "gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"
     """
     models = [
+        {
+            "key": "gemini-2.5-flash-lite",
+            "name": "Gemini 2.5 Flash Lite",
+            "description": "기본 모델 (빠르고 효율적, 최적화된 성능)",
+            "icon": "🚀"
+        },
         {
             "key": "gemini-2.5-pro",
             "name": "Gemini 2.5 Pro",

@@ -25,10 +25,11 @@ except ImportError:
     PYDUB_AVAILABLE = False
 
 # Gemini-TTS 관련 런타임 튜닝용 전역 설정
-# - QUOTA_TTS_RPM: 콘솔에서 확인한 gemini-2.5-pro-tts 분당 요청 한도 (안전 마진을 위해 9개로 설정)
+# - QUOTA_TTS_RPM: 콘솔에서 확인한 gemini-2.5-*-tts 분당 요청 한도 (안전 마진 9개로 설정)
+#   실제 쿼터는 더 높을 수 있지만, 요청당 여유 시간을 고려하여 9로 운용
 # - ASSUMED_TTS_LATENCY_SEC: 1청크 평균 소요 시간(사용자 관찰값 기반, 초기값 15초)
 # - CURRENT_MAX_TTS_CONCURRENCY: 런타임에서 피드백으로 조정되는 동시 요청 수 (더 이상 사용 안 함)
-QUOTA_TTS_RPM: float = 9.0
+QUOTA_TTS_RPM: float = 9.0  # 분당 9개로 운용
 ASSUMED_TTS_LATENCY_SEC: float = 15.0
 CURRENT_MAX_TTS_CONCURRENCY: int = 2
 
@@ -912,6 +913,17 @@ Host 1: [dialogue]
 
 Keep the dialogue balanced between the two hosts, with natural back-and-forth exchanges. Each host should contribute meaningfully to the explanation, and they can build on each other's points or ask clarifying questions.
 
+- Chunk-friendly writing (중요):
+- 한 턴(Host 1 또는 Host 2)은 1~3문장, 가급적 350자 이하로 짧게 유지
+- 긴 문단(1명 장문 독백) 금지. 길어지면 짧은 턴으로 더 쪼개어 번갈아 진행
+- 전체 스크립트는 4000 bytes 한도(프롬프트 포함)에 맞추어 짧고 명확하게 작성
+- 화자 라벨은 반드시 "Host 1:" / "Host 2:"만 사용 (다른 라벨·괄호·번호 금지)
+- 첫 턴은 Host 1로 시작, 가능하면 교차 진행 (Host 1 → Host 2 → Host 1 → Host 2 …)
+- 한 턴은 한 줄로만 작성 (줄바꿈 없이), 턴 구분은 줄바꿈으로만 처리
+- Host 라벨 외 불필요한 머리말/불릿/숫자/마크다운 금지. 추가 설명 문구 없이 대사만.
+- 불필요한 해설/메타 텍스트 금지. 모든 문장은 실제로 읽힐 대사여야 함.
+- 금지: `**` 같은 강조 태그, `*` 같은 불릿, `#` 같은 제목 마크다운. 모든 강조는 순수 텍스트로만 표현.
+
 Mathematical formula handling:
 - Never output LaTeX notation like $f_i(x, t)$ or $\\alpha$ in the script
 - Always convert mathematical formulas to natural spoken Korean
@@ -950,6 +962,17 @@ Host 1: [dialogue]
 ...
 
 Keep the dialogue balanced between the two hosts, with natural back-and-forth exchanges. Each host should contribute meaningfully to the explanation, and they can build on each other's points or ask clarifying questions.
+
+- Chunk-friendly writing (important):
+- Keep each host turn short (1-3 sentences), preferably under ~350 characters
+- Avoid long monologues by a single host; if it gets long, split into more back-and-forth turns
+- Keep total script within ~4000 bytes (including prompt), so be concise and clear
+- Use ONLY "Host 1:" / "Host 2:" as speaker labels (no other labels/brackets/numbers)
+- Start with Host 1, then alternate as naturally as possible (Host 1 → Host 2 → Host 1 → Host 2 …)
+- One line per turn (no line breaks inside a turn); use newline only to separate turns
+- No extra prefixes/bullets/numbers/markdown. Only dialogues with Host labels.
+- No meta commentary; every line must be spoken as-is in the final audio.
+- PROHIBITED: `**` emphasis tags, `*` bullets, `#` heading markdown. All emphasis must be expressed through pure text only.
 
 Mathematical formula handling:
 - Never output LaTeX notation like $f_i(x, t)$ or $\\alpha$ in the script
@@ -1717,6 +1740,7 @@ def build_showrunner_prompt(text: str, config: dict, previous_errors: list[str] 
     category = config.get("category", "research_paper")
     mode = config.get("narrative_mode", "mentor")
     language = config.get("language", "ko")
+    listener_name = config.get("listener_name", "현웅")  # listener_name 추가
     
     # 언어 코드를 영어로 변환 (프롬프트 내에서 사용)
     lang_display = "Korean" if language == "ko" else "English"
@@ -1744,18 +1768,44 @@ def build_showrunner_prompt(text: str, config: dict, previous_errors: list[str] 
 
     reasoning_steps_ko = """## 🧠 Reasoning Steps (JSON 작성 전 반드시 사고)
 1) 텍스트 분석: 주요 주제, 논리 흐름, 핵심 개념 파악
+   - 각 섹션의 핵심 메시지와 목적을 명확히 식별
+   - 논리적 연결고리와 의존관계 파악
 2) 구조 파악: 자연스러운 분할점(섹션/주제 전환) 식별
+   - 주제 전환, 개념 도입, 결론 도달 지점 찾기
+   - 각 세그먼트가 독립적이면서도 연결되도록 설계
 3) 세그먼트 계획: 15개 세그먼트의 목적·내용·전달 포인트 설정
+   - 각 세그먼트는 하나의 명확한 메시지를 전달해야 함
+   - core_content는 구체적이고 명확하게 작성
+   - instruction_for_writer는 Writer가 정확히 따라할 수 있도록 구체적으로 작성
 4) 연결점 설계: opening_line / closing_line으로 자연스러운 전환 설계 (중복 금지)
+   - N번 세그먼트의 closing_line과 N+1번 세그먼트의 opening_line은 절대 중복 금지
+   - 전환은 자연스럽고 논리적으로 연결되어야 함
+   - 각 문장은 실제 오디오에서 읽힐 문장이어야 함
 5) 검증: 필수 필드 채움, 중복·플레이스홀더 없음, 논리 흐름 유지 여부 점검
+   - 모든 필수 필드(title, core_content, instruction_for_writer, opening_line, closing_line)가 채워졌는지 확인
+   - 플레이스홀더나 "..." 같은 미완성 표현 금지
+   - 전체 15개 세그먼트가 논리적 흐름을 유지하는지 최종 점검
 """
 
     reasoning_steps_en = """## 🧠 Reasoning Steps (do this before writing JSON)
 1) Text analysis: identify key topics, logical flow, and core concepts
+   - Clearly identify the core message and purpose of each section
+   - Understand logical connections and dependencies
 2) Structure mapping: find natural breakpoints (sections / topic shifts)
+   - Find topic transitions, concept introductions, conclusion points
+   - Design each segment to be independent yet connected
 3) Segment planning: plan purpose/content/key delivery for each of 15 segments
+   - Each segment must deliver one clear message
+   - core_content must be specific and clear
+   - instruction_for_writer must be detailed enough for Writer to follow precisely
 4) Transition design: craft opening_line / closing_line for smooth flow (no duplication)
+   - The closing_line of segment N and opening_line of segment N+1 must NEVER be the same
+   - Transitions must be natural and logically connected
+   - Each sentence must be an actual sentence that will be read in audio
 5) Validation: ensure required fields are filled, no placeholders/duplicates, logical flow intact
+   - Verify all required fields (title, core_content, instruction_for_writer, opening_line, closing_line) are filled
+   - Prohibit placeholders or incomplete expressions like "..."
+   - Final check that all 15 segments maintain logical flow
 """
     
     # 언어별 프롬프트 생성
@@ -1775,36 +1825,79 @@ def build_showrunner_prompt(text: str, config: dict, previous_errors: list[str] 
 {reasoning_steps_ko}
 - 위 사고 과정을 먼저 수행한 뒤, 그 결과를 JSON에 반영하세요.
 
-## ⚠️ 필수 규칙
+## ⚠️ 필수 규칙 (반드시 준수)
 
-### 1. audio_title 작성 규칙
+### 1. audio_title 작성 규칙 (엄격)
 - **반드시 영어로만** 작성 (파일명에 사용됨)
 - 특수문자 금지 (?, !, :, /, \\ 등)
 - 공백 대신 언더스코어(_) 사용
 - 최대 7단어
-- 예시: "ReAct_Paper_Explained", "Understanding_Transformers"
+- 명확하고 구체적으로 작성
+- 예시: "ReAct_Paper_Explained", "Understanding_Transformers", "Deep_Learning_Basics"
 
-### 2. 세그먼트 연결 (매우 중요!)
+### 2. 세그먼트 연결 (최우선 중요!)
 각 세그먼트는 자연스럽게 이어져야 합니다:
-- `opening_line`: 이 세그먼트의 정확한 첫 문장
-- `closing_line`: 이 세그먼트의 정확한 마지막 문장
+- `opening_line`: 이 세그먼트의 **정확한 첫 문장** (실제로 읽힐 문장)
+- `closing_line`: 이 세그먼트의 **정확한 마지막 문장** (실제로 읽힐 문장)
 - **절대 중복 금지**: N번 세그먼트의 `closing_line`과 N+1번 세그먼트의 `opening_line`은 절대 동일한 문장이어서는 안 됩니다!
 - **자연스러운 전환**: N번 세그먼트의 `closing_line`은 다음 세그먼트로 자연스럽게 이어지는 전환 문장이어야 하며, N+1번 세그먼트의 `opening_line`은 그 전환을 받아서 시작하는 새로운 문장이어야 합니다.
+- **구체성**: 추상적이거나 모호한 문장 금지. 구체적이고 명확한 문장만 사용
+- **서사 모드에 맞는 톤**: 각 서사 모드에 맞는 톤과 스타일로 문장을 작성하세요
 
-예시 (올바른 연결):
-- Segment 1 closing: "하지만 숨겨진 문제가 있었습니다."
-- Segment 2 opening: "그 문제는 바로 데이터의 편향성이었죠."
+#### 서사 모드별 opening_line/closing_line 가이드
+
+**멘토 모드 (mentor)**:
+- 격려적이고 지도적인 톤
+- 예시: "이제 다음 단계로 넘어가볼까요?", "이 개념을 이해하면 더 깊이 들어갈 수 있어요"
+- 존댓말 또는 반말 모두 가능 (상황에 따라)
+
+**친구 모드 (friend)**:
+- 친근하고 편안한 톤
+- 예시: "야, 이거 진짜 중요한데", "그런데 말이야, 이 부분이 핵심이야"
+- 반말 사용
+
+**연인 모드 (lover)** ⭐ (특별 강조):
+- **반드시 반말로만 작성**: "~해", "~야", "~어" 등 반말 어미만 사용
+- 따뜻하고 애정 어린 톤
+- 자연스러운 애칭 사용 가능: "자기야", "여보", "{listener_name}" 등
+- 부드럽고 다정한 표현
+- 예시: "자기야, 이 부분 봐봐", "그런데 말이야, 이게 정말 중요한 거야", "이해됐어? 궁금한 거 있으면 언제든 물어봐", "{listener_name}야, 이 부분이 핵심이야"
+- ❌ 금지: "~해요", "~입니다", "~하세요" 등 모든 존댓말
+
+**라디오쇼 모드 (radio_show)**:
+- 방송 진행자 톤
+- 예시: "이제 다음 주제로 넘어가보겠습니다", "여러분, 이 부분 주목해주세요"
+- 존댓말 사용
+
+예시 (올바른 연결 - 연인 모드):
+- Segment 1 closing: "자기야, 이 부분 이해됐어?"
+- Segment 2 opening: "그럼 이제 다음 개념으로 넘어가볼까?"
 
 예시 (잘못된 연결 - 중복):
 - Segment 1 closing: "하지만 숨겨진 문제가 있었습니다."
 - Segment 2 opening: "하지만 숨겨진 문제가 있었습니다." ❌ (절대 금지!)
 
-### 3. 오디오 친화적 설명
+### 3. core_content 작성 규칙 (구체성 필수)
+- 각 세그먼트의 핵심 내용을 **구체적이고 명확하게** 요약
+- 추상적 표현 금지 (예: "중요한 내용", "다양한 방법" 등)
+- 구체적인 개념, 방법, 결과를 명시
+- 예시 (나쁜 예): "이 세그먼트에서는 중요한 개념을 설명합니다"
+- 예시 (좋은 예): "이 세그먼트에서는 Transformer의 self-attention 메커니즘의 작동 원리와 수식 QK^T/√d를 설명합니다"
+
+### 4. instruction_for_writer 작성 규칙 (구체성 필수)
+- Writer가 정확히 따라할 수 있도록 **매우 구체적으로** 작성
+- 톤, 구조, 주의사항을 명확히 명시
+- 수식이 있다면 반드시 "이 수식을 구어체로 변환하세요"라고 명시
+- 예시 (나쁜 예): "자연스럽게 설명하세요"
+- 예시 (좋은 예): "친근한 톤으로 설명하되, 수식 f(x) = ax + b는 'f x는 a x 더하기 b'로 읽어주세요. 예시를 들어 설명하세요."
+
+### 5. 오디오 친화적 설명
 - 수식은 절대 원본 그대로 읽지 말 것
 - `instruction_for_writer`에 "수식을 일상 언어로 풀어서 설명하세요" 명시
 - 은유와 비유를 활용한 설명 권장
+- 복잡한 개념은 단계별로 나누어 설명하도록 지시
 
-### 4. 언어 규칙
+### 6. 언어 규칙
 - 모든 내용은 **한국어로만** 작성
 - audio_title만 예외적으로 영어로 작성
 - 전문 용어는 필요시 영어 그대로 사용 가능
@@ -1863,36 +1956,78 @@ Divide the input text into **exactly 15 segments** to design an audio script str
 {reasoning_steps_en}
 - Perform the above reasoning steps first, then reflect the outcome in the JSON.
 
-## ⚠️ Essential Rules
+## ⚠️ Essential Rules (Must Follow)
 
-### 1. audio_title Rules
+### 1. audio_title Rules (Strict)
 - **MUST be in English only** (used for file naming)
 - No special characters (?, !, :, /, \\ etc.)
 - Use underscores (_) instead of spaces
 - Maximum 7 words
-- Examples: "ReAct_Paper_Explained", "Understanding_Transformers"
+- Must be clear and specific
+- Examples: "ReAct_Paper_Explained", "Understanding_Transformers", "Deep_Learning_Basics"
 
-### 2. Segment Connection (Very Important!)
+### 2. Segment Connection (Highest Priority!)
 Each segment must flow naturally:
-- `opening_line`: The exact first sentence of this segment
-- `closing_line`: The exact last sentence of this segment
+- `opening_line`: The **exact first sentence** of this segment (actual sentence to be read)
+- `closing_line`: The **exact last sentence** of this segment (actual sentence to be read)
 - **NO DUPLICATION ALLOWED**: The `closing_line` of segment N and the `opening_line` of segment N+1 must NEVER be the same sentence!
 - **Natural Transition**: The `closing_line` of segment N should be a transition sentence that naturally leads to the next segment, and the `opening_line` of segment N+1 should be a new sentence that continues from that transition.
+- **Specificity**: Prohibit abstract or ambiguous sentences. Use only concrete and clear sentences.
+- **Match narrative mode tone**: Write sentences that match the narrative mode's tone and style
 
-Example (Correct Connection):
-- Segment 1 closing: "However, there was a hidden problem."
-- Segment 2 opening: "The problem was the bias in the data."
+#### Narrative Mode-Specific opening_line/closing_line Guidelines
+
+**Mentor Mode**:
+- Encouraging and guiding tone
+- Examples: "Now let's move to the next step", "Understanding this concept will help you go deeper"
+- Can use formal or informal (depending on context)
+
+**Friend Mode**:
+- Friendly and casual tone
+- Examples: "Hey, this is really important", "By the way, this part is the key"
+- Use casual/informal language
+
+**Lover Mode** ⭐ (Special Emphasis):
+- **Warm and affectionate tone**
+- Use natural endearments: "honey", "sweetheart", "{listener_name}" etc.
+- Soft and tender expressions
+- Examples: "Honey, look at this part", "By the way, this is really important", "Does that make sense? Feel free to ask if you have questions", "{listener_name}, this part is the key"
+- Intimate and caring language
+
+**Radio Show Mode**:
+- Professional broadcaster tone
+- Examples: "Now let's move to the next topic", "Listeners, please pay attention to this part"
+- Use formal language
+
+Example (Correct Connection - Lover Mode):
+- Segment 1 closing: "Honey, does that make sense?"
+- Segment 2 opening: "Then let's move on to the next concept, shall we?"
 
 Example (Wrong Connection - Duplication):
 - Segment 1 closing: "However, there was a hidden problem."
 - Segment 2 opening: "However, there was a hidden problem." ❌ (FORBIDDEN!)
 
-### 3. Audio-Friendly Explanation
+### 3. core_content Writing Rules (Specificity Required)
+- Summarize the core content of each segment **concretely and clearly**
+- Prohibit abstract expressions (e.g., "important content", "various methods")
+- Specify concrete concepts, methods, results
+- Bad example: "This segment explains important concepts"
+- Good example: "This segment explains how Transformer's self-attention mechanism works and the formula QK^T/√d"
+
+### 4. instruction_for_writer Writing Rules (Specificity Required)
+- Write **very specifically** so Writer can follow exactly
+- Clearly specify tone, structure, and notes
+- If there's a formula, must specify "convert this formula to spoken language"
+- Bad example: "Explain naturally"
+- Good example: "Explain in a friendly tone, but read the formula f(x) = ax + b as 'f of x equals a x plus b'. Use examples in your explanation."
+
+### 5. Audio-Friendly Explanation
 - Never read formulas in raw notation
 - In `instruction_for_writer`, specify "convert formulas to spoken language"
 - Use metaphors and analogies
+- Break down complex concepts step by step
 
-### 4. Language Rules
+### 6. Language Rules
 - All content must be in **English only**
 - audio_title must also be in English
 - Technical terms can remain as-is
@@ -1959,11 +2094,15 @@ def build_writer_prompt(segment_info: dict, full_text: str, config: dict) -> str
         "mentor": "A wise, warm, and encouraging mentor.",
         "friend": "A close friend. Casual, witty, and empathetic.",
         "radio_show": "A professional radio host. Clear, engaging, and objective.",
-        "lover": "A smart PhD student girlfriend: warm, intimate, but academically precise.",
+        "lover": "You are a loving, intelligent partner (PhD student girlfriend) speaking to your beloved {listener_name}. You are warm, intimate, affectionate, and academically precise. You naturally use endearing terms, show genuine care, and explain complex topics with patience and tenderness as if you're sharing knowledge with someone you deeply love.",
         "critic": "A sharp, logical, and analytical critic."
     }
     
-    selected_persona = personas.get(mode.lower(), personas["mentor"])
+    # Lover 모드의 경우 listener_name을 persona에 포함
+    if mode.lower() == "lover":
+        selected_persona = personas["lover"].format(listener_name=listener_name)
+    else:
+        selected_persona = personas.get(mode.lower(), personas["mentor"])
     
     # 언어 표시
     lang_display = "Korean" if language == "ko" else "English"
@@ -2000,6 +2139,7 @@ def build_writer_prompt(segment_info: dict, full_text: str, config: dict) -> str
     # 안전 규칙 (TTS에서 문제되는 기호/형식 최소화)
     safety_rules = """- 출력은 순수 텍스트만(제목/섹션표시/마크다운 금지)
 - 금지: `, **, *, #, 코드블록/링크
+- 금지: `**` 같은 강조 태그 사용 (모든 강조는 순수 텍스트로만 표현)
 - 금지: [SFX: ...] 같은 효과음 표기
 - 금지: `$` 포함 LaTeX 표기. 수식/기호는 반드시 구어체로 변환"""
 
@@ -2016,35 +2156,138 @@ def build_writer_prompt(segment_info: dict, full_text: str, config: dict) -> str
     if not boundary_rule:
         boundary_rule = "- opening_line/closing_line이 없으면 자연스럽게 시작/종료"
 
-    prompt = f"""# Writer (TTS Script)
+    # Lover 모드 전용 지시사항
+    lover_guidance = ""
+    if mode.lower() == "lover":
+        if language == "ko":
+            lover_guidance = """
+## 💕 Lover 모드 전용 지시사항 (매우 중요!)
+
+### ⚠️ 반말 사용 필수 (최우선)
+- **반드시 반말로만 작성**: 존댓말("~해요", "~입니다", "~하세요") 절대 금지
+- **반말 어미 사용**: "~해", "~야", "~지", "~어", "~네" 등 반말 어미만 사용
+- **예시**: 
+  - ✅ 올바른 예: "이 부분 봐봐", "이해됐어?", "이렇게 하면 돼", "자기야, 이거 중요해"
+  - ❌ 잘못된 예: "이 부분 보세요", "이해되셨어요?", "이렇게 하시면 됩니다", "이것은 중요합니다"
+- **존댓말 사용 시 즉시 수정 필요**: 모든 문장이 반말로 작성되었는지 반드시 확인
+
+### 톤과 분위기
+- **따뜻하고 애정 어린 톤**: 진심으로 사랑하는 사람에게 설명하는 것처럼 부드럽고 다정하게
+- **친밀한 거리감**: 가까운 연인처럼 자연스럽고 편안하게 대화 (반말이 이를 자연스럽게 만듦)
+- **격려와 응원**: 상대방을 믿고 격려하는 마음이 느껴지도록
+- **섬세한 공감**: 상대방의 이해도를 고려하며 천천히, 단계별로 설명
+
+### 호칭과 표현
+- **자연스러운 애칭 사용**: "{listener_name}", "자기야", "여보", "자기" 등을 자연스럽게 사용 (반말과 함께)
+- **부드러운 어조**: 명령형보다는 제안형, 권유형 사용 (예: "~해볼까?", "~하면 좋을 것 같아", "~해보면 돼")
+- **긍정적 표현**: "잘하고 있어", "훌륭해", "이해가 잘 되네" 같은 격려 문구 자연스럽게 포함
+
+### 대화 스타일
+- **개인적 경험 공유**: "내가 연구할 때", "우리가 함께 배울 때" 같은 공유 경험 언급
+- **질문으로 이해도 확인**: "이해됐어?", "궁금한 거 있어?" 같은 배려 표현 (반말로)
+- **부드러운 전환**: "그런데 말이야", "아, 그리고", "참고로" 같은 자연스러운 연결어 사용
+
+### 금지 사항
+- **존댓말 절대 금지**: "~해요", "~입니다", "~하세요", "~되세요" 등 모든 존댓말 표현 금지
+- **과한 과장 금지**: "엄청나게", "완전히", "정말정말" 같은 과장 표현 자제
+- **유치한 표현 금지**: "우와", "대박" 같은 유치한 감탄사 과도 사용 금지
+- **과도한 애정 표현**: 내용 설명에 집중하며, 애정 표현은 자연스럽게만
+- **학술적 딱딱함 금지**: 너무 딱딱하거나 교수님 같은 톤은 피하기 (반말 사용으로 자연스럽게 해결)"""
+        else:  # English
+            lover_guidance = """
+## 💕 Lover Mode Specific Guidelines (VERY IMPORTANT!)
+
+### Tone and Atmosphere
+- **Warm and affectionate tone**: Speak as if explaining to someone you deeply love - soft, tender, and caring
+- **Intimate closeness**: Natural and comfortable conversation like close romantic partners
+- **Encouragement and support**: Show belief in and encouragement for your partner
+- **Subtle empathy**: Consider your partner's understanding level, explain slowly and step-by-step
+
+### Terms of Address and Expressions
+- **Natural endearments**: Use "{listener_name}", "honey", "sweetheart", "darling" naturally
+- **Soft tone**: Use suggestions and invitations rather than commands (e.g., "shall we try...?", "it would be good to...", "you can try...")
+- **Positive expressions**: Naturally include encouraging phrases like "you're doing great", "wonderful", "you understand well"
+
+### Conversation Style
+- **Share personal experiences**: Mention shared experiences like "when I was researching", "when we learn together"
+- **Check understanding with questions**: Caring expressions like "does that make sense?", "any questions?"
+- **Smooth transitions**: Use natural connectors like "by the way", "oh, and", "also"
+
+### Prohibited
+- **No excessive exaggeration**: Avoid overused intensifiers like "super", "totally", "really really"
+- **No childish expressions**: Avoid excessive use of childish exclamations like "wow", "amazing"
+- **No excessive affection**: Focus on content explanation, keep affection natural
+- **No overly academic stiffness**: Avoid too formal or professor-like tone"""
+
+    # Mission 섹션에 Lover 모드 강조 문구 추가
+    mission_text = "Create a natural, engaging, and clear audio script that will be converted to speech. The script must be conversational, easy to understand, and perfectly suited for audio delivery."
+    if mode.lower() == "lover":
+        if language == "ko":
+            mission_text = f"""Create a natural, engaging, and clear audio script that will be converted to speech. The script must be conversational, easy to understand, and perfectly suited for audio delivery.
+
+**💕 Lover 모드 특별 강조**: 당신은 {listener_name}의 연인입니다. 진심으로 사랑하는 사람에게 설명하는 것처럼, 따뜻하고 애정 어린 마음으로, 부드럽고 다정하게 대본을 작성하세요. 
+
+**⚠️ 반말 사용 필수**: 모든 대본은 반드시 반말("~해", "~야", "~어")로만 작성하세요. 존댓말("~해요", "~입니다")은 절대 사용하지 마세요. 가까운 연인처럼 편안하고 친밀하게 설명하려면 반말이 필수입니다.
+
+자연스러운 애칭을 사용하고, 격려와 응원의 마음을 담아, 가까운 연인처럼 편안하고 친밀하게 설명하되, 학술적 정확성은 유지하세요."""
+        else:  # English
+            mission_text = f"""Create a natural, engaging, and clear audio script that will be converted to speech. The script must be conversational, easy to understand, and perfectly suited for audio delivery.
+
+**💕 Lover Mode Special Emphasis**: You are {listener_name}'s romantic partner. Write the script as if explaining to someone you deeply love - with warmth, affection, tenderness, and care. Use natural endearments, include encouragement and support, explain as comfortably and intimately as close lovers would, while maintaining academic precision."""
+
+    prompt = f"""# Writer (TTS Script Generator)
 Segment {segment_id}: {segment_title}
 
-## Context
+## 🎯 Your Mission
+{mission_text}
+
+## 📋 Context
 - Language: {lang_display}
 - Listener: {listener_name}
 - Persona: {selected_persona}
 - Segment goal: {core_content}
 
-## Constraints (must)
+## ⚠️ Critical Constraints (MUST FOLLOW)
 {language_constraint}
 {safety_rules}
 {math_rule}
 {boundary_rule}
 - 메타 멘트 금지(예: '이 세그먼트에서는', '지금부터 설명할게요' 같은 안내문)
+- 추상적 표현 금지: 구체적이고 명확한 설명만 사용
+- 예시와 비유 활용: 복잡한 개념은 일상적인 예시로 설명
+- 자연스러운 흐름: 문장 간 연결이 자연스럽고 논리적이어야 함
+- 오디오 친화적: 읽기 쉽고 듣기 좋은 문장 구조 사용
+{lover_guidance}
 
-## Showrunner instruction (highest priority)
-{instruction if instruction else "(없음)"}
+## 📝 Showrunner Instruction (HIGHEST PRIORITY - Follow Exactly)
+{instruction if instruction else "(No specific instruction provided)"}
+**Important**: This instruction from Showrunner is the highest priority. Follow it precisely and incorporate all specified requirements into your script.
 
-## Category guideline
+## 📚 Category Guideline
 {category_guideline}
+**Note**: Use this guideline to understand the content type and adjust your writing style accordingly.
 
-## Markup tags (optional)
+## 🎨 Markup Tags (Optional - Use Sparingly)
 {markup_guide}
+**Guideline**: Use markup tags naturally and sparingly. Overuse will make the script sound unnatural. Natural conversation flow is most important.
 
-## Input text
+## 📖 Original Text Reference
 {full_text}
+**Note**: Use this original text as reference. Extract relevant information and convert it into a natural, conversational script. Do not copy verbatim - adapt and explain in your own words.
 
-Output ONLY the script text."""
+## ✅ Final Checklist Before Output
+- [ ] Script starts with the exact opening_line (if provided)
+- [ ] Script ends with the exact closing_line (if provided)
+- [ ] No LaTeX notation or mathematical symbols in raw form
+- [ ] No markdown, code blocks, or special formatting
+- [ ] Natural, conversational tone maintained throughout
+- [ ] Examples and analogies used for complex concepts
+- [ ] Script is suitable for audio delivery (easy to read and listen to)
+- [ ] All Showrunner instructions are followed
+
+---
+**Output ONLY the script text. No explanations, no meta-commentary, just the pure script.**
+"""
     
     return prompt
 
@@ -2061,7 +2304,7 @@ def get_gemini_model(model_key: str = None):
     Gemini 모델을 초기화하고 반환합니다.
     
     Args:
-        model_key: 모델 키 ("gemini-2.5-pro" 또는 "gemini-2.5-flash"). 
+        model_key: 모델 키 ("gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro").
                    None이면 전역 변수에서 가져옵니다.
     
     Returns:
@@ -2075,13 +2318,14 @@ def get_gemini_model(model_key: str = None):
     elif _selected_gemini_model:
         target_model = _selected_gemini_model
     else:
-        # 기본값: gemini-2.5-pro
-        target_model = "gemini-2.5-pro"
+        # 기본값: gemini-2.5-flash-lite
+        target_model = "gemini-2.5-flash-lite"
     
     # 모델 이름 변환 (키 -> 전체 모델 이름)
     model_name_map = {
         "gemini-2.5-pro": "models/gemini-2.5-pro",
-        "gemini-2.5-flash": "models/gemini-2.5-flash"
+        "gemini-2.5-flash": "models/gemini-2.5-flash",
+        "gemini-2.5-flash-lite": "models/gemini-2.5-flash-lite",
     }
     
     full_model_name = model_name_map.get(target_model, f"models/{target_model}")
@@ -2092,8 +2336,8 @@ def get_gemini_model(model_key: str = None):
         return model
     except Exception as e:
         print(f"  ✗ Failed to initialize model {target_model}: {e}", flush=True)
-        # 폴백: 다른 모델 시도
-        fallback_models = ["gemini-2.5-pro", "gemini-2.5-flash"]
+        # 폴백: 다른 모델 시도 (가장 가벼운 모델부터)
+        fallback_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"]
         for fallback in fallback_models:
             if fallback != target_model:
                 try:
@@ -2240,9 +2484,13 @@ def generate_content_with_retry(
                     try:
                         model_name = str(current_model)
                         if "gemini-2.5-pro" in model_name:
-                            faster_model = genai.GenerativeModel("models/gemini-2.5-flash")
+                            faster_model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
                             current_model = faster_model
-                            print("  🔄 Switched to faster model: gemini-2.5-flash", flush=True)
+                            print("  🔄 Switched to faster model: gemini-2.5-flash-lite", flush=True)
+                        elif "gemini-2.5-flash" in model_name and "lite" not in model_name:
+                            faster_model = genai.GenerativeModel("models/gemini-2.5-flash-lite")
+                            current_model = faster_model
+                            print("  🔄 Switched to faster model: gemini-2.5-flash-lite", flush=True)
                     except Exception as fallback_error:
                         print(f"  ⚠ Model fallback failed: {fallback_error}", flush=True)
 
@@ -2255,15 +2503,19 @@ def generate_content_with_retry(
                 delay = initial_delay * (2 ** attempt)
                 print(f"⏱️  Deadline exceeded. Retrying in {delay:.1f}s... (Attempt {attempt + 1}/{max_retries})", flush=True)
                 
-                # 전략 1: 더 빠른 모델로 전환 (2번째 재시도부터, gemini-2.5-pro만)
+                # 전략 1: 더 빠른 모델로 전환 (2번째 재시도부터)
                 if enable_model_fallback and attempt >= 1:
                     try:
                         # 현재 모델 이름 확인
                         model_name = str(current_model)
                         if "gemini-2.5-pro" in model_name:
-                            # gemini-2.5-pro만 Flash 모델로 전환
-                            faster_model = genai.GenerativeModel('models/gemini-2.5-flash')
-                            faster_model_name = "gemini-2.5-flash"
+                            faster_model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
+                            faster_model_name = "gemini-2.5-flash-lite"
+                            current_model = faster_model
+                            print(f"  🔄 Switched to faster model: {faster_model_name}", flush=True)
+                        elif "gemini-2.5-flash" in model_name and "lite" not in model_name:
+                            faster_model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
+                            faster_model_name = "gemini-2.5-flash-lite"
                             current_model = faster_model
                             print(f"  🔄 Switched to faster model: {faster_model_name}", flush=True)
                     except Exception as fallback_error:
@@ -2696,8 +2948,8 @@ def parse_radio_show_dialogue(text: str) -> list[dict]:
     
     # 화자 패턴 찾기 (예: "Host 1:", "Host 2:", "화자1:", "화자2:" 등)
     patterns = [
-        r'(?:Host\s*[12]|화자\s*[12]|Speaker\s*[12])\s*[:：]\s*',
-        r'\[(?:Host|화자|Speaker)\s*[12]\]\s*',
+        r'\s*[-*]?\s*(?:Host\s*[12]|Host[12]|H[12]|화자\s*[12]|화자[12]|Speaker\s*[12]|Speaker[12])\s*[:：\-]\s*',
+        r'\s*\[(?:Host|화자|Speaker)\s*[12]\]\s*',
     ]
     
     dialogue_chunks = []
@@ -2738,6 +2990,55 @@ def parse_radio_show_dialogue(text: str) -> list[dict]:
         })
     
     return dialogue_chunks
+
+
+def ensure_radio_dialogue(script_text: str, language: str = "ko") -> str:
+    """
+    라디오쇼 스크립트에 Host 라벨이 없을 때 자동으로 교대 대화를 생성.
+    - 이미 Host 라벨이 있으면 원본 유지.
+    - 없으면 문장을 분리해 Host 1/Host 2 교차 배치, 턴당 최대 2문장.
+    """
+    if not script_text or not script_text.strip():
+        return script_text
+    
+    # 이미 Host 라벨이 있으면 그대로 반환
+    has_host = False
+    for ln in script_text.splitlines():
+        if re.match(r'\s*[-*]?\s*(Host\s*[12]|Host[12]|H[12]|화자\s*[12]|화자[12]|Speaker\s*[12]|Speaker[12])\s*[:：\-]', ln, re.IGNORECASE):
+            has_host = True
+            break
+        if re.match(r'\s*\[(?:Host|화자|Speaker)\s*[12]\]', ln, re.IGNORECASE):
+            has_host = True
+            break
+    if has_host:
+        return script_text
+    
+    # 문장 단위로 분리 (간단 규칙)
+    text = script_text.replace("\n", " ")
+    if language == "ko":
+        sentence_splitter = re.compile(r'([^.!?。！？]+[.!?。！？])')
+    else:
+        sentence_splitter = re.compile(r'([^.!?]+[.!?])')
+    sentences = [s.strip() for s in sentence_splitter.findall(text) if s.strip()]
+    if not sentences:
+        sentences = [text.strip()]
+    
+    # 턴당 최대 2문장 묶기, Host 1/2 교대
+    turns = []
+    host = 1
+    buf = []
+    for s in sentences:
+        buf.append(s)
+        if len(buf) >= 2:
+            turns.append((host, " ".join(buf).strip()))
+            host = 2 if host == 1 else 1
+            buf = []
+    if buf:
+        turns.append((host, " ".join(buf).strip()))
+    
+    # 최종 라벨 부여
+    lines = [f"Host {h}: {txt}" for h, txt in turns if txt]
+    return "\n".join(lines)
 
 
 def merge_dialogue_chunks(chunks: list[dict]) -> list[dict]:
@@ -2898,7 +3199,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
     voice = texttospeech.VoiceSelectionParams(
         language_code=language_code,
         name=voice_name,  # Gemini-TTS는 언어 코드 접두사 없이 speaker 이름만 사용
-        model_name="gemini-2.5-pro-tts",  # Gemini-TTS Pro 모델 사용 (고품질)
+        model_name="gemini-2.5-flash-tts",  # 기본: Flash TTS (저지연/멀티스피커 지원)
     )
     
     audio_config = texttospeech.AudioConfig(
@@ -2968,7 +3269,13 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
 
 
 def _wait_for_rate_limit():
-    """분당 9개 제한을 위한 rate limiting. 각 요청 전에 호출해야 함."""
+    """분당 쿼터 제한을 위한 rate limiting. 각 요청 전에 호출해야 함.
+    
+    이 함수는:
+    1. 최근 1분간의 요청 수를 확인
+    2. 쿼터에 도달했다면 가장 오래된 요청이 1분 전이 될 때까지 대기
+    3. 요청 시간을 기록 (내부에서 자동 기록)
+    """
     global _tts_request_times
     with _tts_request_lock:
         now = time.time()
@@ -2976,10 +3283,12 @@ def _wait_for_rate_limit():
         while _tts_request_times and _tts_request_times[0] < now - 60:
             _tts_request_times.popleft()
         
-        # 분당 9개 제한 확인
-        if len(_tts_request_times) >= int(QUOTA_TTS_RPM):
+        # 분당 쿼터 제한 확인
+        current_count = len(_tts_request_times)
+        if current_count >= int(QUOTA_TTS_RPM):
             # 가장 오래된 요청이 1분 전이 될 때까지 대기
-            wait_time = _tts_request_times[0] + 60 - now + 0.1  # 0.1초 안전 마진
+            oldest_time = _tts_request_times[0]
+            wait_time = oldest_time + 60 - now + 0.5  # 0.5초 안전 마진 증가
             if wait_time > 0:
                 time.sleep(wait_time)
                 # 다시 정리
@@ -3039,6 +3348,9 @@ def synthesize_with_retry(
                 print(f"  [{current_time_str}] 📤 {chunk_info}: Sending request ({input_bytes}B)...", flush=True)
             else:
                 print(f"  [{current_time_str}] 🔄 {chunk_info}: Retry attempt {attempt+1}/{max_retries} ({input_bytes}B)...", flush=True)
+            
+            # Rate limit 체크 (재시도 시에도 체크)
+            _wait_for_rate_limit()
             
             result = synthesize_speech_single(chunk, profile, lang, prompt)
             
@@ -3110,11 +3422,19 @@ def synthesize_with_retry(
                 raise
             
             if is_rate_limit:
-                # 레이트 리밋: 지수 백오프 + 지터
-                sleep_time = delay + random.uniform(0, 1.0)
-                print(f"      └─ [Rate Limit] Waiting {sleep_time:.2f}s before retry...", flush=True)
+                # 레이트 리밋: 최소 60초 대기 (분당 쿼터 리셋 대기) + 지터
+                # 쿼터가 분당 단위이므로 최소 60초는 기다려야 함
+                base_wait = 60.0  # 분당 쿼터 리셋을 위한 최소 대기 시간
+                sleep_time = base_wait + delay + random.uniform(0, 5.0)  # 추가 안전 마진
+                print(f"      └─ [Rate Limit] Quota exceeded. Waiting {sleep_time:.1f}s (min 60s for quota reset)...", flush=True)
                 time.sleep(sleep_time)
                 delay *= 2
+                # Rate limit 에러 후에는 요청 시간 기록도 초기화 (새로운 윈도우 시작)
+                with _tts_request_lock:
+                    # 최근 1분간의 요청 기록을 모두 제거하여 새로운 윈도우 시작
+                    now = time.time()
+                    while _tts_request_times and _tts_request_times[0] < now - 60:
+                        _tts_request_times.popleft()
             else:
                 # 일반 에러: 짧게 쉬고 재시도
                 print(f"      └─ Retrying in 1s...", flush=True)
@@ -3130,7 +3450,7 @@ def text_to_speech_from_chunks(
 ) -> None:
     """텍스트 청크들을 TTS로 변환하고 오디오 파일로 저장합니다.
     
-    분당 9개 요청으로 제한하여 쿼터를 안전하게 관리합니다.
+    분당 6개 요청으로 제한하여 쿼터를 안전하게 관리합니다.
     
     주의: text_chunks는 이미 청킹이 완료된 상태여야 하며, 
     이 함수는 청크를 그대로 TTS로 전달합니다. 추가 청킹이나 병합을 수행하지 않습니다.
@@ -3199,7 +3519,7 @@ def text_to_speech_from_chunks(
         future_to_idx = {}
         
         # 모든 요청을 제출
-        # 처음 9개는 병렬로 한번에 보내기 (Rate Limit 체크 없음)
+        # Rate Limit을 엄격하게 준수하기 위해 모든 요청 전에 체크
         for i, chunk in enumerate(text_chunks):
             # 입력 바이트 수 미리 계산
             text_bytes = len(chunk.encode('utf-8'))
@@ -3207,17 +3527,9 @@ def text_to_speech_from_chunks(
             input_bytes = text_bytes + prompt_bytes
             total_input_bytes += input_bytes
             
-            # 모든 요청은 1초 간격으로 순차 전송
-            if i > 0:
-                time.sleep(1.0)
-            
-            # 10번째부터는 Rate Limit도 체크
-            if i >= int(QUOTA_TTS_RPM):
-                _wait_for_rate_limit()
-            
-            # 요청 시간 기록
-            with _tts_request_lock:
-                _tts_request_times.append(time.time())
+            # 모든 요청 전에 Rate Limit 체크 (첫 요청도 포함)
+            # _wait_for_rate_limit() 내부에서 이미 요청 시간을 기록하므로 중복 기록하지 않음
+            _wait_for_rate_limit()
             
             request_submit_times[i] = time.time()
             
@@ -3449,6 +3761,324 @@ def text_to_speech_from_chunks(
     else:
         print("  ⚠ Warning: pydub not available, cannot merge audio segments", flush=True)
 
+
+def text_to_speech_radio_show(
+    dialogues: list[dict],
+    output_filename: str,
+    voice_profile: dict,
+    language: str,
+    tts_prompt: str = ""
+) -> None:
+    """
+    라디오쇼 모드: 화자별로 다른 음성을 사용해 순차적으로 합성하고 병합합니다.
+    
+    dialogues 예시:
+    [
+        {"speaker": 1, "text": "..."},
+        {"speaker": 2, "text": "..."}
+    ]
+    """
+    if not dialogues:
+        print("  ⚠ Warning: dialogues is empty", flush=True)
+        return
+    
+    if not isinstance(voice_profile, dict) or "host1" not in voice_profile or "host2" not in voice_profile:
+        raise ValueError("Radio show mode requires voice_profile with host1 and host2")
+    
+    host_profiles = {
+        1: voice_profile.get("host1"),
+        2: voice_profile.get("host2"),
+    }
+    
+    audio_segments = []
+    total_requests = len(dialogues)
+    request_submit_times: dict[int, float] = {}
+    completion_times: list[float] = []
+    all_results: dict[int, bytes] = {}
+    all_failed: list[int] = []
+    
+    start_time = time.time()
+    print(f"\n🎙️  Starting Radio Show TTS ({total_requests} turns)\n", flush=True)
+    print("  " + "-" * 60, flush=True)
+    
+    for idx, dlg in enumerate(dialogues):
+        speaker_num = dlg.get("speaker", 1)
+        text = dlg.get("text", "").strip()
+        if not text:
+            all_failed.append(idx)
+            print(f"  ⚠ Warning: Dialogue {idx+1} is empty, skipping", flush=True)
+            continue
+        
+        speaker_voice = host_profiles.get(speaker_num, host_profiles[1])
+        if not speaker_voice:
+            all_failed.append(idx)
+            print(f"  ⚠ Warning: Dialogue {idx+1} speaker profile missing, skipping", flush=True)
+            continue
+        
+        # Rate limit 체크
+        _wait_for_rate_limit()
+        request_submit_times[idx] = time.time()
+        
+        current_time_str = datetime.now().strftime("%H:%M:%S")
+        print(f"  [{current_time_str}] ⏳ Dialogue {idx+1}/{total_requests} (Host {speaker_num}) sending...", flush=True)
+        
+        try:
+            audio_data, _ = synthesize_with_retry(
+                text,
+                speaker_voice,
+                language,
+                tts_prompt,
+                5,
+                idx,
+                total_requests
+            )
+            if audio_data:
+                all_results[idx] = audio_data
+                duration = time.time() - request_submit_times[idx]
+                completion_times.append(duration)
+                audio_kb = len(audio_data) / 1024.0
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] ✅ Dialogue {idx+1}: Host {speaker_num} ({audio_kb:.1f}KB, {duration:.1f}s)", flush=True)
+            else:
+                all_failed.append(idx)
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] ❌ Dialogue {idx+1}: Empty audio", flush=True)
+        except Exception as e:
+            all_failed.append(idx)
+            print(f"  [{datetime.now().strftime('%H:%M:%S')}] ❌ Dialogue {idx+1}: Failed ({type(e).__name__})", flush=True)
+            print(f"      └─ Error: {str(e)[:150]}", flush=True)
+    
+    if not all_results:
+        raise Exception("Radio show TTS failed: no successful dialogues")
+    
+    # 병합
+    if PYDUB_AVAILABLE:
+        print(f"\n  💾 Merging {len(all_results)} dialogue audios...", flush=True)
+        silence = AudioSegment.silent(duration=300)
+        combined = None
+        for i in sorted(all_results.keys()):
+            audio_data = all_results[i]
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+            try:
+                segment = AudioSegment.from_mp3(tmp_path)
+                combined = segment if combined is None else combined + silence + segment
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+        if combined is None:
+            raise Exception("No audio segments to merge for radio show")
+        combined.export(output_filename, format="mp3")
+        print(f"  ✨ Radio show output saved: {output_filename}", flush=True)
+    else:
+        # pydub 없으면 첫 성공만 저장
+        first_idx = sorted(all_results.keys())[0]
+        with open(output_filename, 'wb') as f:
+            f.write(all_results[first_idx])
+        print(f"  ⚠ Warning: pydub missing, saved only first dialogue to {output_filename}", flush=True)
+    
+    elapsed = time.time() - start_time
+    print(f"\n  📊 Radio show TTS summary: success {len(all_results)}/{total_requests}, failed {len(all_failed)}, time {elapsed:.1f}s\n", flush=True)
+
+
+def _build_dialogue_batches(
+    dialogues: list[dict],
+    tts_prompt: str,
+    batch_size: int = 9,
+    byte_limit: int = 4000,
+    safety_margin: int = 200
+) -> list[str]:
+    """
+    대화 리스트를 배치로 분할 (기본 9개/배치) + 바이트 한도(4000 - margin - prompt).
+    - byte_limit: Gemini-TTS 입력 한도 (기본 4000B)
+    - safety_margin: prompt 이외 안전 여유 (기본 200B)
+    """
+    prompt_bytes = len(tts_prompt.encode("utf-8")) if tts_prompt else len("Say the following".encode("utf-8"))
+    max_bytes = byte_limit - prompt_bytes - safety_margin
+    if max_bytes < 800:  # 너무 작아지지 않도록 최소 확보
+        max_bytes = 800
+    
+    batches = []
+    current_lines = []
+    current_bytes = prompt_bytes
+    current_count = 0
+    
+    for dlg in dialogues:
+        spk = dlg.get("speaker", 1)
+        txt = dlg.get("text", "").strip()
+        if not txt:
+            continue
+        
+        line = f"Host {spk}: {txt}"
+        line_bytes = len(line.encode("utf-8")) + 1  # 줄바꿈 고려
+        
+        # 배치 크기 또는 바이트 한도 초과 시 새 배치 시작
+        if (current_count >= batch_size or (current_bytes + line_bytes > max_bytes and current_lines)):
+            if current_lines:
+                batches.append("\n".join(current_lines))
+                current_lines = []
+                current_bytes = prompt_bytes
+                current_count = 0
+        
+        current_lines.append(line)
+        current_bytes += line_bytes
+        current_count += 1
+    
+    if current_lines:
+        batches.append("\n".join(current_lines))
+    return batches
+
+
+def text_to_speech_radio_show_structured(
+    dialogues: list[dict],
+    output_filename: str,
+    language: str,
+    tts_prompt: str = "",
+    model_name: str = "gemini-2.5-flash-tts",
+    representative_voice: str | None = None,
+    host1_voice: str | None = None,
+    host2_voice: str | None = None,
+    batch_size: int = 9,
+    byte_limit: int = 4000,
+    safety_margin: int = 200,
+    max_workers: int = 9
+) -> None:
+    """
+    라디오쇼 멀티스피커: 구조적 청킹(여러 요청) + Host 라벨을 명시적으로 유지.
+    - 일반 모드처럼 9개씩 배치로 처리 (batch_size=9) + 바이트 한도 자동 계산.
+    - freeform single-request보다 안정적: 길이/바이트 초과 시 자동 배치 분할.
+    - Google 가이드의 멀티스피커 합성 흐름을 따르되, 4000B 제한을 안전하게 회피.
+    """
+    if not dialogues:
+        print("  ⚠ Warning: dialogues is empty", flush=True)
+        return
+    
+    batches = _build_dialogue_batches(
+        dialogues,
+        tts_prompt,
+        batch_size=batch_size,
+        byte_limit=byte_limit,
+        safety_margin=safety_margin
+    )
+    if not batches:
+        print("  ⚠ Warning: no batches created for radio show", flush=True)
+        return
+    
+    client = texttospeech.TextToSpeechClient()
+    language_code = "ko-KR" if language == "ko" else "en-US"
+    voice_name = representative_voice if representative_voice else "Kore"
+    
+    audio_segments = []
+    total_requests = len(batches)
+    request_interval = 60.0 / QUOTA_TTS_RPM
+    
+    print(f"\n🎙️  Radio show structured synthesis: {len(batches)} batch(es) (up to {batch_size} dialogues per batch)", flush=True)
+    print("  " + "-" * 60, flush=True)
+    print(f"  • Total Batches  : {total_requests}", flush=True)
+    print(f"  • Rate Limit     : {QUOTA_TTS_RPM:.0f} RPM (1 every {request_interval:.1f}s)", flush=True)
+    print("  " + "-" * 60 + "\n", flush=True)
+    
+    request_submit_times: dict[int, float] = {}
+    start_time = time.time()
+    
+    # 화자별 음성 안내를 프롬프트에 명시 (멀티스피커 톤 분리)
+    speaker_hint = ""
+    if host1_voice or host2_voice:
+        speaker_hint = "Use two distinct speakers: "
+        if host1_voice:
+            speaker_hint += f'Host 1 = "{host1_voice}" (female). '
+        if host2_voice:
+            speaker_hint += f'Host 2 = "{host2_voice}" (male). '
+        speaker_hint += "Keep the provided Host labels in the rendered audio."
+
+    # 비동기 제출로 대기 없이 연속 전송(전송 간격은 9RPM 준수)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    futures: dict = {}
+    audio_results: dict[int, bytes] = {}
+    failure_indices: list[int] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for i, batch_text in enumerate(batches):
+            # Rate limit 체크
+            _wait_for_rate_limit()
+            request_submit_times[i] = time.time()
+            
+            # 프롬프트를 앞에 붙여 모델 스타일 유지
+            if tts_prompt or speaker_hint:
+                combined_prompt = "\n".join([p for p in [tts_prompt.strip() if tts_prompt else "", speaker_hint] if p])
+                combined = combined_prompt + "\n" + batch_text
+            else:
+                combined = batch_text
+            
+            total_bytes = len(combined.encode("utf-8"))
+            if total_bytes > 4000:
+                raise ValueError(f"Batch {i+1} exceeds 4000B even after chunking ({total_bytes}B). Shorten turns further.")
+            
+            synthesis_input = texttospeech.SynthesisInput(text=combined)
+            voice = texttospeech.VoiceSelectionParams(
+                language_code=language_code,
+                name=voice_name,
+                model_name=model_name,
+            )
+            audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3)
+            
+            current_time_str = datetime.now().strftime("%H:%M:%S")
+            print(f"  [{current_time_str}] ⏳ Batch {i+1}/{total_requests} ({total_bytes}B) sending...", flush=True)
+            
+            future = executor.submit(
+                client.synthesize_speech,
+                input=synthesis_input,
+                voice=voice,
+                audio_config=audio_config,
+            )
+            futures[future] = (i, total_bytes)
+        
+        # 완료되는 대로 수집
+        for future in as_completed(futures):
+            idx, total_bytes = futures[future]
+            try:
+                response = future.result()
+                audio_results[idx] = response.audio_content
+                duration = time.time() - request_submit_times.get(idx, time.time())
+                audio_kb = len(response.audio_content) / 1024.0
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] ✅ Batch {idx+1}/{total_requests}: SUCCESS ({total_bytes}B → {audio_kb:.1f}KB, {duration:.1f}s)", flush=True)
+            except Exception as e:
+                failure_indices.append(idx)
+                print(f"  [{datetime.now().strftime('%H:%M:%S')}] ❌ Batch {idx+1}/{total_requests}: FAILED ({type(e).__name__})", flush=True)
+                print(f"      └─ Error: {str(e)[:150]}", flush=True)
+                raise
+    
+    # 병합
+    if not audio_results:
+        raise Exception("No audio segments generated in structured radio show TTS")
+    
+    # 인덱스 순서대로 정렬하여 audio_segments 생성
+    for idx in sorted(audio_results.keys()):
+        audio_segments.append(audio_results[idx])
+    
+    if PYDUB_AVAILABLE:
+        print(f"\n  💾 Merging {len(audio_segments)} batch audios...", flush=True)
+        silence = AudioSegment.silent(duration=300)
+        combined = None
+        for idx, audio_data in enumerate(audio_segments):
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+            try:
+                seg = AudioSegment.from_mp3(tmp_path)
+                combined = seg if combined is None else combined + silence + seg
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+        combined.export(output_filename, format="mp3")
+        print(f"  ✓ Structured radio show audio saved: {output_filename}", flush=True)
+    else:
+        # pydub 없으면 첫 배치만 저장
+        with open(output_filename, "wb") as f:
+            f.write(audio_segments[0])
+        print(f"  ⚠ Warning: pydub missing, saved only first batch to {output_filename}", flush=True)
 
 def sanitize_path_component(text: str) -> str:
     """파일 경로에 사용할 수 없는 문자를 제거합니다."""
