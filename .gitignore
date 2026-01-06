@@ -75,9 +75,12 @@ outputs/
 temp_output/
 backend_dist/
 
-# Frontend (not needed for CLI usage)
-frontend/
+# Electron (not needed for CLI usage)
 electron/
+
+# Frontend build artifacts (source is tracked)
+frontend/node_modules/
+frontend/dist/
 
 # Build artifacts
 build/
