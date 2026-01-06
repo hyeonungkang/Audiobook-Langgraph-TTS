@@ -42,6 +42,8 @@ try:
         prompt_listener_name,
         PYDUB_AVAILABLE,
         log_error,
+        print_error,
+        print_warning,
         save_workflow_timing_log,
         get_workflow_timing_summary,
         set_gemini_model,
@@ -103,8 +105,7 @@ def main():
         _log("src/main.py:34", "initialize_api_keys() succeeded", {}, "B")
     except Exception as e:
         _log("src/main.py:36", "initialize_api_keys() failed", {"error": str(e), "type": type(e).__name__}, "B")
-        log_error(f"API key initialization failed: {e}", context="main")
-        print(f"✗ Error: API key initialization failed: {e}", flush=True)
+        print_error(f"API key initialization failed: {e}", context="main", exception=e)
         return
     
     _log("src/main.py:38", "After API init, setting up paths", {}, "B")
@@ -196,7 +197,7 @@ def main():
         print(f"\n[1/4] Reading input file: {input_file}", flush=True)
         sys.stdout.flush()
         if not input_file.exists():
-            print(f"✗ Error: Input file not found: {input_file}", flush=True)
+            print_error(f"Input file not found: {input_file}", context="main")
             return
         
         with open(input_file, "r", encoding="utf-8") as f:
@@ -205,19 +206,60 @@ def main():
         if not raw_text.strip():
             print("Warning: input.txt file is empty.", flush=True)
             return
+        
+        # JSON 형식인지 확인 (showrunner segments JSON)
+        parsed_segments = None
+        parsed_audio_title = None
+        parsed_audio_metadata = None
+        
+        try:
+            # JSON 파싱 시도
+            parsed_data = json.loads(raw_text.strip())
             
-        print(f"  ✓ Input text length: {len(raw_text):,} characters", flush=True)
-        print(f"  ✓ Input text bytes: {len(raw_text.encode('utf-8')):,} bytes", flush=True)
+            # Case 1: showrunner JSON 형식 확인 ({"segments": [...], "audio_title": ...})
+            if isinstance(parsed_data, dict) and "segments" in parsed_data:
+                parsed_segments = parsed_data.get("segments", [])
+                parsed_audio_title = parsed_data.get("audio_title", "Research_Paper_Audio")
+                parsed_audio_metadata = parsed_data.get("audio_metadata", {})
+                print(f"  ✓ Detected showrunner JSON format (dict with segments)", flush=True)
+                print(f"  ✓ Segments count: {len(parsed_segments)}", flush=True)
+                print(f"  ✓ Audio title: {parsed_audio_title}", flush=True)
+                sys.stdout.flush()
+            # Case 2: JSON 배열 형태 (showrunner의 segments 배열 직접) - [{segment_id: 1, ...}, ...]
+            elif isinstance(parsed_data, list) and len(parsed_data) > 0:
+                # 첫 번째 요소가 segment 형식인지 확인 (segment_id, title, core_content 등이 있는지)
+                first_item = parsed_data[0]
+                if isinstance(first_item, dict) and "segment_id" in first_item:
+                    parsed_segments = parsed_data
+                    # 배열 형태에서는 audio_title과 audio_metadata를 추출할 수 없으므로 None으로 설정
+                    # showrunner_node에서 생성하거나 기본값 사용
+                    parsed_audio_title = None
+                    parsed_audio_metadata = None
+                    print(f"  ✓ Detected showrunner segments array format", flush=True)
+                    print(f"  ✓ Segments count: {len(parsed_segments)}", flush=True)
+                    print(f"  ℹ︎ Will skip showrunner and proceed directly to writer", flush=True)
+                    sys.stdout.flush()
+                else:
+                    # 배열이지만 segment 형식이 아님
+                    parsed_segments = None
+            else:
+                # JSON이지만 showrunner 형식이 아님
+                parsed_segments = None
+        except (json.JSONDecodeError, ValueError):
+            # JSON이 아님 - 일반 텍스트로 처리
+            parsed_segments = None
+        
+        if parsed_segments is None:
+            print(f"  ✓ Input text length: {len(raw_text):,} characters", flush=True)
+            print(f"  ✓ Input text bytes: {len(raw_text.encode('utf-8')):,} bytes", flush=True)
         sys.stdout.flush()
         
     except FileNotFoundError:
-        log_error(f"Input file not found: {input_file}", context="main")
-        print(f"✗ Error: Input file not found: {input_file}", flush=True)
+        print_error(f"Input file not found: {input_file}", context="main")
         sys.stdout.flush()
         return
     except Exception as e:
-        log_error(f"File read error: {e}", context="main")
-        print(f"✗ File read error: {e}", flush=True)
+        print_error(f"File read error: {e}", context="main", exception=e)
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -239,12 +281,14 @@ def main():
                 "voice_profile": selected_voice,
                 "listener_name": listener_name
             },
-            "segments": [],
+            "segments": parsed_segments if parsed_segments else [],
             "scripts": [],
             "audio_chunks": [],
             "audio_paths": [],
+            "audio_chapters": None,
             "final_audio_path": None,
-            "audio_title": None,
+            "audio_title": parsed_audio_title if parsed_audio_title else None,
+            "audio_metadata": parsed_audio_metadata if parsed_audio_metadata else None,
             "output_dir": None,
             "errors": []
         }
@@ -261,7 +305,7 @@ def main():
         # 에러 확인
         errors = final_state.get("errors", [])
         if errors:
-            print(f"  ⚠ Warning: {len(errors)} errors occurred during processing", flush=True)
+            print_warning(f"{len(errors)} errors occurred during processing", context="main")
             for error in errors:
                 print(f"    - {error.get('node_name')}: {error.get('error_message')}", flush=True)
         
@@ -277,8 +321,7 @@ def main():
         
         sys.stdout.flush()
     except Exception as e:
-        log_error(f"LangGraph execution failed: {e}", context="main")
-        print(f"✗ LangGraph execution failed: {e}", flush=True)
+        print_error(f"LangGraph execution failed: {e}", context="main", exception=e)
         import traceback
         traceback.print_exc()
         sys.stdout.flush()
@@ -322,7 +365,7 @@ if __name__ == "__main__":
         print("\nInterrupted by user.", flush=True)
         sys.exit(0)
     except Exception as e:
-        log_error(f"Fatal error: {e}", context="main_entry")
+        print_error(f"Fatal error: {e}", context="main_entry", exception=e)
         print("\n" + "="*60, flush=True)
         print("An error occurred during program execution:", flush=True)
         print("="*60, flush=True)
