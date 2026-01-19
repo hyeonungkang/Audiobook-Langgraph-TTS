@@ -37,7 +37,6 @@ _log_import("src/main.py:30", "Before importing .utils", {}, "D")
 try:
     from .utils import (
         get_mode_profile,
-        get_tts_prompt_for_mode,
         get_listener_names,
         prompt_listener_name,
         PYDUB_AVAILABLE,
@@ -160,7 +159,6 @@ def main():
     print("="*70, flush=True)
     selected_mode = select_narrative_mode(category=selected_category)
     mode_profile = get_mode_profile(selected_mode)
-    tts_prompt = get_tts_prompt_for_mode(mode_profile, selected_language)
     print(f"  ✓ Narrative style: {mode_profile['label']} ({mode_profile['description']})", flush=True)
     
     # 5단계: 음성 선택 (라디오쇼 모드는 두 개의 음성 필요)

@@ -12,7 +12,6 @@ from ..utils import (
     parse_radio_show_dialogue,
     merge_dialogue_chunks,
     remove_ssml_tags,
-    get_tts_prompt_for_mode,
     get_mode_profile,
     sanitize_path_component,
     log_error,
@@ -42,6 +41,9 @@ def tts_generator_node(state: AgentState) -> AgentState:
         narrative_mode = config.get("narrative_mode", "mentor")
         voice_profile = config.get("voice_profile")
         radio_single_request = config.get("radio_show_single_request", True)
+        tts_backend = config.get("tts_backend", "cloud")
+        tts_model_name = config.get("tts_model_name", "gemini-2.5-pro-tts")
+        tts_genai_model_id = config.get("tts_genai_model_id", "gemini-2.5-flash-preview-tts")
         
         if not scripts:
             print("  ⚠ Warning: No scripts to process", flush=True)
@@ -72,6 +74,7 @@ def tts_generator_node(state: AgentState) -> AgentState:
                 # SSML 제거는 단일 화자용. 라디오쇼에서는 원본 라벨/마크업을 보존.
                 if narrative_mode != "radio_show":
                     script_text = remove_ssml_tags(script_text)
+                
                 full_text += script_text + "\n\n"
                 valid_scripts_count += 1
         
@@ -89,10 +92,6 @@ def tts_generator_node(state: AgentState) -> AgentState:
             return state
         
         print(f"  ✓ Combined {valid_scripts_count} valid scripts, total text length: {len(full_text)} chars", flush=True)
-        
-        # TTS 프롬프트 가져오기
-        mode_profile = get_mode_profile(narrative_mode)
-        tts_prompt = get_tts_prompt_for_mode(mode_profile, language)
         
         if narrative_mode == "radio_show":
             # 라디오쇼: 두 화자의 대화를 분리 후 화자별 음성으로 합성
@@ -157,11 +156,13 @@ def tts_generator_node(state: AgentState) -> AgentState:
                     dialogues=dialogues,
                     output_filename=str(temp_output_path),
                     language=language,
-                    tts_prompt=tts_prompt,
-                    model_name=config.get("tts_model_name", "gemini-2.5-flash-tts"),
+                    model_name=tts_model_name,
                     representative_voice=rep_voice,
                     host1_voice=host1_name,
-                    host2_voice=host2_name
+                    host2_voice=host2_name,
+                    narrative_mode=narrative_mode,
+                    tts_backend=tts_backend,
+                    genai_tts_model_id=tts_genai_model_id,
                 )
             else:
                 # 화자별 개별 합성 후 병합 (기존 안전 경로)
@@ -170,7 +171,10 @@ def tts_generator_node(state: AgentState) -> AgentState:
                     output_filename=str(temp_output_path),
                     voice_profile=voice_profile,
                     language=language,
-                    tts_prompt=tts_prompt
+                    narrative_mode=narrative_mode,
+                    tts_backend=tts_backend,
+                    tts_model_name=tts_model_name,
+                    genai_tts_model_id=tts_genai_model_id,
                 )
             
             if not temp_output_path.exists():
@@ -193,11 +197,11 @@ def tts_generator_node(state: AgentState) -> AgentState:
         else:
             # 단일 화자 모드 (기존 로직)
             print(f"\nTTS: Chunking {len(scripts_sorted)} scripts for TTS...", flush=True)
-            audio_chunks = chunk_text_for_tts(full_text, language=language, tts_prompt=tts_prompt)
+            audio_chunks = chunk_text_for_tts(full_text, language=language)
             
             if not audio_chunks:
                 print("  ⚠ Warning: No audio chunks generated from text", flush=True)
-                print(f"  Debug: full_text length = {len(full_text)}, tts_prompt length = {len(tts_prompt)}", flush=True)
+                print(f"  Debug: full_text length = {len(full_text)}", flush=True)
                 error_info = {
                     "node_name": "tts_generator",
                     "error_message": "No audio chunks generated",
@@ -259,7 +263,10 @@ def tts_generator_node(state: AgentState) -> AgentState:
                     output_filename=str(temp_output_path),
                     voice_profile=voice_profile,
                     language=language,
-                    tts_prompt=tts_prompt
+                    narrative_mode=narrative_mode,
+                    tts_backend=tts_backend,
+                    tts_model_name=tts_model_name,
+                    genai_tts_model_id=tts_genai_model_id,
                 )
                 
                 # 생성된 오디오 파일 확인

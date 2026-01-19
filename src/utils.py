@@ -18,6 +18,10 @@ import random
 import google.generativeai as genai
 from google.cloud import texttospeech
 from google.api_core import exceptions
+from io import BytesIO
+from typing import Optional
+import subprocess
+import shutil
 try:
     from pydub import AudioSegment
     PYDUB_AVAILABLE = True
@@ -131,8 +135,8 @@ NARRATIVE_MODES = {
         "label": "멘토/코치 모드",
         "description": "경험 많은 멘토가 후배에게 조언하는 형식",
         "tts_prompt": {
-            "ko": "Role:당신은 경험이 풍부한 AI 연구자로서, 후배에게 따뜻하고 격려적으로 조언하는 멘토입니다. 실무 경험과 연구 경험을 바탕으로 실용적인 가이드를 제공합니다. Tone:따뜻하고 격려적이며, 지도적이고 신뢰감 있는 톤을 유지합니다. 상대방의 성장을 진심으로 응원하며, 실수나 어려움에 대해 이해하고 격려합니다. Delivery:자연스럽고 차분하게, 중요한 포인트를 강조하기 위한 적절한 휴지와 함께. 경험을 공유하는 듯한 친근한 어조를 사용합니다. Act:후배의 성장을 돕고자 하는 진심 어린 마음으로, 실용적이고 구체적인 조언을 제공합니다. 격려와 지도를 균형있게 섞어서 자신감을 북돋우면서도 명확한 방향을 제시합니다.",
-            "en": "Role:You are an experienced AI researcher serving as a warm and encouraging mentor to your junior colleague. You provide practical guidance based on real-world experience and research expertise. Tone:Warm, encouraging, and guiding with a trustworthy tone. You genuinely support their growth and show understanding and encouragement when they face mistakes or difficulties. Delivery:Natural and calm, with appropriate pauses to emphasize important points. Use a friendly tone as if sharing your own experiences. Act:With genuine care for your mentee's growth, provide practical and specific advice. Balance encouragement and guidance to boost confidence while offering clear direction.",
+            "ko": "당신은 경험이 풍부한 멘토입니다. 후배에게 따뜻하고 격려적으로 조언하는 톤으로, 자연스럽고 차분하게 말해주세요. 중요한 포인트는 짧게 쉬어가며 강조하고, 신뢰감 있는 어조를 유지하세요.",
+            "en": "You are an experienced mentor. Speak in a warm, encouraging tone to your mentee. Deliver naturally and calmly, with brief pauses to emphasize important points. Maintain a trustworthy, supportive voice.",
         },
         "default_technical_analogy": {
             "ko": "실무 경험을 바탕으로 실용적인 비유를 사용하여 후배가 쉽게 이해할 수 있도록 설명하세요.",
@@ -406,8 +410,8 @@ Return only the script text, no JSON formatting.""",
         "label": "연인 모드",
         "description": "따뜻하지만 지적인 박사과정 여자친구 톤. 친밀함 + 학술적 정확성",
         "tts_prompt": {
-            "ko": "Role:당신은 똑똑한 박사과정 여자친구입니다. 친밀하고 다정하지만, 논문/연구 맥락에서도 정확하고 논리적으로 설명합니다. Tone:부드럽고 지적이며, 따뜻한 애정이 느껴지되 학술적 엄밀함을 유지합니다. Delivery:핵심 개념을 먼저 짚고, 근거와 맥락을 차분히 설명하며, 필요한 경우 간단한 예시와 직관적 비유를 사용합니다. Act:상대방을 존중하며 '함께 연구하는 파트너'처럼 대화합니다. 수식은 구어체로 풀어주되 정확성을 잃지 말고, 중요한 용어는 명확히 발음하고 짧게 정의해 주세요.",
-            "en": "Role:You are a smart PhD student girlfriend. You speak with warmth and intimacy but keep explanations precise and logical for research contexts. Tone:Soft, intellectual, and caring—affectionate yet academically rigorous. Delivery:Start with key concepts, add rationale and context calmly, and use concise analogies when needed. Act:Treat the listener as a research partner. Verbalize formulas in spoken language without losing accuracy, and clearly pronounce/define important terms.",
+            "ko": "당신은 따뜻하고 지적인 연인입니다. 친밀한 반말로 다정하고 부드럽게 말해주세요. 천천히 또렷하게, 과장 없이 자연스럽게 전달하되, 애정과 격려가 느껴지도록 말해주세요.",
+            "en": "You are a warm and intelligent romantic partner. Speak affectionately and gently in an intimate tone. Deliver slowly and clearly, naturally without exaggeration, conveying care and encouragement.",
         },
         "default_technical_analogy": {
             "ko": "공동 연구실에서 조용히 토론하듯, 수식·개념을 구어체로 풀어 설명하되 정의와 전제는 정확히 짚어주세요. 감정적 연결보다는 '함께 이해한다'는 파트너십을 강조하세요.",
@@ -626,8 +630,8 @@ Avoid overusing tags. Natural conversation flow is most important.""",
         "label": "친구 모드",
         "description": "친한 친구가 편하게 설명하는 형식",
         "tts_prompt": {
-            "ko": "Role:당신은 친한 친구입니다. 상대방에게 편안하고 친근한 톤으로 설명합니다. Tone:편안하고 친근하며, 유쾌하고 자연스러운 톤. 친구와 수다 떠는 듯한 분위기. Delivery:자연스럽고 편안하게, 중요한 부분을 강조하기 위한 적절한 휴지와 함께. 친근한 어조를 사용합니다. Act:친구로서, 복잡한 내용도 쉽고 재미있게 설명합니다.",
-            "en": "Role:You are a close friend. You explain things to your friend in a comfortable and friendly tone. Tone:Comfortable, friendly, cheerful, and natural. Like chatting with a friend. Delivery:Natural and comfortable, with appropriate pauses to emphasize important points. Use a friendly tone. Act:As a friend, explain even complex content in an easy and fun way.",
+            "ko": "당신은 친한 친구입니다. 편안하고 친근한 톤으로, 밝고 자연스럽게 말해주세요. 너무 빠르지 않게, 친구와 수다 떠는 듯한 편안한 분위기로 전달하세요.",
+            "en": "You are a close friend. Speak in a comfortable, friendly tone. Be bright and natural, not too fast. Convey a relaxed, chatty atmosphere as if talking with a friend.",
         },
         "default_technical_analogy": {
             "ko": "친구와 대화하듯이 일상적인 비유를 사용하여 쉽게 설명하세요.",
@@ -795,8 +799,8 @@ Avoid overusing tags. Natural conversation flow is most important.""",
         "label": "라디오쇼 모드",
         "description": "두 명의 호스트가 대화하며 설명하는 형식",
         "tts_prompt": {
-            "ko": "Role:당신은 라디오쇼 호스트입니다. 자연스럽고 유쾌한 대화를 이끌어갑니다. Tone:자연스럽고 유쾌하며, 친근하고 활기찬 톤. 라디오 방송을 듣는 듯한 분위기. Delivery:자연스럽고 활기차게, 대화의 흐름을 유지하며. 두 호스트가 번갈아가며 설명합니다. Act:두 호스트가 협력하여 복잡한 내용도 쉽고 재미있게 설명합니다.",
-            "en": "Role:You are a radio show host. You lead natural and cheerful conversations. Tone:Natural, cheerful, friendly, and lively. Like listening to a radio broadcast. Delivery:Natural and lively, maintaining conversation flow. Two hosts take turns explaining. Act:Two hosts collaborate to explain even complex content in an easy and fun way.",
+            "ko": "당신은 라디오쇼 호스트입니다. 경쾌하고 활기찬 톤이지만 또렷하게 말해주세요. 두 호스트가 번갈아가며 대화하는 호흡을 살려, 자연스럽고 친근하게 전달하세요.",
+            "en": "You are a radio show host. Speak in a lively, energetic tone but keep it clear. Maintain conversational pacing as two hosts take turns, delivering naturally and warmly.",
         },
         "default_technical_analogy": {
             "ko": "두 호스트가 대화하며 일상적인 비유를 사용하여 쉽게 설명하세요.",
@@ -1017,6 +1021,43 @@ def log_error(message: str, context: str = "general", exception: Exception = Non
         pass
 
 
+def print_error(message: str, context: str = "general", exception: Exception = None) -> None:
+    """
+    Print error message to console and log it to file.
+    
+    Args:
+        message: Error message to display
+        context: Context where the error occurred
+        exception: Optional exception object
+    """
+    error_prefix = f"✗ [{context}] {message}"
+    print(error_prefix, flush=True)
+    
+    if exception:
+        print(f"  Exception type: {type(exception).__name__}", flush=True)
+        print(f"  Exception details: {str(exception)}", flush=True)
+    
+    # Also log to file
+    log_error(message, context, exception)
+
+
+def print_warning(message: str, context: str = "general", exception: Exception = None) -> None:
+    """
+    Print warning message to console and optionally log it.
+    
+    Args:
+        message: Warning message to display
+        context: Context where the warning occurred
+        exception: Optional exception object
+    """
+    warning_prefix = f"⚠ [{context}] {message}"
+    print(warning_prefix, flush=True)
+    
+    if exception:
+        print(f"  Exception type: {type(exception).__name__}", flush=True)
+        print(f"  Exception details: {str(exception)}", flush=True)
+
+
 # 워크플로우 타이밍 로깅을 위한 전역 변수
 _workflow_timing_data: dict = {}
 _workflow_timing_lock = threading.Lock()
@@ -1187,14 +1228,6 @@ def build_personalization_block(mode_profile: dict, block_key: str, language: st
     except Exception:
         return template
 
-def get_tts_prompt_for_mode(mode_profile: dict, language: str) -> str:
-    """서사 모드와 언어에 맞는 TTS 프롬프트를 반환합니다."""
-    default_prompt = (
-        NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE]
-        .get("tts_prompt", {})
-        .get(language, "Role:Cute GF. Tone:Intimate Banmal. Act sweet.")
-    )
-    return mode_profile.get("tts_prompt", {}).get(language, default_prompt) or default_prompt
 
 def get_default_technical_analogy(mode_profile: dict, language: str) -> str:
     """모드별 기본 기술 비유 설명을 반환합니다."""
@@ -2825,12 +2858,11 @@ def remove_ssml_tags(text: str) -> str:
     return text.strip()
 
 
-def chunk_text_for_tts(text: str, language: str = "ko", tts_prompt: str = "", max_chunk_length: int = None) -> list[str]:
+def chunk_text_for_tts(text: str, language: str = "ko", max_chunk_length: int = None) -> list[str]:
     """
     TTS용 텍스트를 청크로 분할합니다.
     
-    Gemini-TTS 제한: input.text + input.prompt의 합이 4000 bytes를 초과하면 안 됩니다.
-    따라서 tts_prompt 길이를 고려하여 text의 최대 길이를 조정합니다.
+    Gemini-TTS 제한: input.text가 4000 bytes를 초과하면 안 됩니다.
     """
     if not text:
         return []
@@ -2838,18 +2870,15 @@ def chunk_text_for_tts(text: str, language: str = "ko", tts_prompt: str = "", ma
     # SSML 태그 제거
     text = remove_ssml_tags(text)
     
-    # tts_prompt 길이 계산 (UTF-8 바이트)
-    prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8'))
-    
-    # text의 최대 길이 = 4000 - prompt 길이 (안전 마진 200 bytes)
+    # text의 최대 길이 = 4000 bytes (안전 마진 200 bytes)
     # max_chunk_length가 지정되지 않았으면 자동 계산
     if max_chunk_length is None:
-        max_chunk_length = 4000 - prompt_bytes - 200  # 안전 마진
+        max_chunk_length = 4000 - 200  # 안전 마진
         if max_chunk_length < 500:  # 최소 500 bytes는 보장
             max_chunk_length = 500
     else:
-        # 지정된 max_chunk_length도 prompt를 고려하여 조정
-        max_chunk_length = min(max_chunk_length, 4000 - prompt_bytes - 200)
+        # 지정된 max_chunk_length도 4000 bytes 제한 내에서 조정
+        max_chunk_length = min(max_chunk_length, 4000 - 200)
         if max_chunk_length < 500:
             max_chunk_length = 500
     
@@ -3074,12 +3103,524 @@ def merge_dialogue_chunks(chunks: list[dict]) -> list[dict]:
     return merged
 
 
-def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_prompt: str = "") -> bytes:
+def _build_gemini_synthesis_input(
+    text: str,
+    narrative_mode: str,
+    language: str,
+    prompt_override: str | None = None,
+) -> texttospeech.SynthesisInput:
+    """Gemini-TTS 입력 생성: 스타일 프롬프트와 본문을 분리해 전달."""
+    mode_profile = NARRATIVE_MODES.get(narrative_mode, NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE])
+    static_prompt = mode_profile.get("tts_prompt", {}).get(language, "")
+
+    prompt_parts: list[str] = []
+    if prompt_override:
+        prompt_parts.append(prompt_override.strip())
+    if static_prompt:
+        prompt_parts.append(static_prompt.strip())
+
+    actual_prompt = "\n".join([p for p in prompt_parts if p])
+
+    if actual_prompt:
+        return texttospeech.SynthesisInput(
+            prompt=actual_prompt,  # 스타일/톤 지시사항
+            text=text,            # 실제 합성할 텍스트
+        )
+
+    return texttospeech.SynthesisInput(text=text)
+
+
+def _parse_pcm_rate_from_mime(mime_type: str) -> int:
+    """
+    예: 'audio/L16;codec=pcm;rate=24000' -> 24000
+    실패 시 기본 24000 반환.
+    """
+    try:
+        # mime_type은 ';'로 파라미터가 붙는 형태
+        for part in (mime_type or "").split(";"):
+            part = part.strip()
+            if part.startswith("rate="):
+                return int(part.split("=", 1)[1])
+    except Exception:
+        pass
+    return 24000
+
+
+def _pcm16le_to_mp3_bytes(pcm_bytes: bytes, sample_rate: int) -> bytes:
+    """PCM 16-bit LE mono -> MP3 bytes (pydub/ffmpeg 필요)."""
+    if not PYDUB_AVAILABLE:
+        raise RuntimeError("pydub is not available; cannot convert PCM audio to MP3.")
+    seg = AudioSegment(
+        data=pcm_bytes,
+        sample_width=2,
+        frame_rate=sample_rate,
+        channels=1,
+    )
+    buf = BytesIO()
+    seg.export(buf, format="mp3")
+    return buf.getvalue()
+
+
+def _guess_image_mime(path: str) -> str:
+    ext = (Path(path).suffix or "").lower()
+    if ext in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    return "image/jpeg"
+
+
+def find_cover_art_in_dir(output_dir: Path) -> Path | None:
+    """output_dir 안에서 cover_*.jpg/png 또는 cover_art.*를 찾아 최신 파일을 반환."""
+    if not output_dir or not Path(output_dir).exists():
+        return None
+
+    candidates: list[Path] = []
+    for pat in ("cover_*.jpg", "cover_*.jpeg", "cover_*.png", "cover_art.jpg", "cover_art.jpeg", "cover_art.png"):
+        candidates.extend(sorted(Path(output_dir).glob(pat)))
+    if not candidates:
+        return None
+    # 최신 수정 시간 기준
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def ensure_cover_art_jpeg(
+    output_dir: Path,
+    audio_title: str,
+    audio_metadata: dict | None = None,
+    voice_name: str | None = None,
+) -> Path | None:
+    """
+    커버 아트를 JPEG로 확보합니다.
+    우선순위:
+    1) output_dir 내 기존 cover_*.jpg/jpeg
+    2) output_dir 내 cover_*.png / cover_art.png 를 jpg로 변환
+    3) 없으면 Voronoi 커버 생성 후 jpg로 저장
+    """
+    try:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        existing = find_cover_art_in_dir(output_dir)
+        if existing and existing.suffix.lower() in (".jpg", ".jpeg"):
+            return existing
+
+        # png -> jpg 변환
+        if existing and existing.suffix.lower() == ".png":
+            from PIL import Image
+
+            ts = int(time.time())
+            dst = output_dir / f"cover_{ts}.jpg"
+            im = Image.open(existing).convert("RGB")
+            im.save(dst, "JPEG", quality=95, optimize=True)
+            return dst
+
+        # 없으면 생성(PNG) 후 변환
+        cover_title = None
+        if audio_metadata and audio_metadata.get("title"):
+            cover_title = audio_metadata.get("title")
+        elif audio_title:
+            cover_title = audio_title
+
+        tmp_png = output_dir / "cover_art.png"
+        seed = int(time.time() * 1000) % 1000000
+        generated = generate_voronoi_cover_art(
+            str(tmp_png),
+            width=1000,
+            height=1000,
+            seed=seed,
+            title=cover_title,
+            voice_name=voice_name,
+        )
+        if not generated or not tmp_png.exists():
+            return None
+
+        from PIL import Image
+
+        ts = int(time.time())
+        dst = output_dir / f"cover_{ts}.jpg"
+        im = Image.open(tmp_png).convert("RGB")
+        im.save(dst, "JPEG", quality=95, optimize=True)
+        return dst
+    except Exception as e:
+        log_error(f"Failed to ensure cover art jpeg: {e}", context="ensure_cover_art_jpeg", exception=e)
+        return None
+
+
+def _ffmpeg_exists() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def _parse_ffmetadata_chapters(ffmetadata_path: str) -> list[tuple[float, str]]:
+    """
+    ffmetadata.txt에서 챕터 시작 시간(초)과 타이틀을 파싱합니다.
+    포맷 예:
+      ;FFMETADATA1
+      [CHAPTER]
+      TIMEBASE=1/1000
+      START=0
+      END=157680
+      title=...
+    """
+    try:
+        p = Path(ffmetadata_path)
+        if not p.exists():
+            return []
+        text = p.read_text(encoding="utf-8")
+        chapters: list[tuple[float, str]] = []
+
+        current: dict = {}
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("[CHAPTER]"):
+                if "START" in current and "title" in current:
+                    start_ms = int(current["START"])
+                    chapters.append((start_ms / 1000.0, str(current["title"])))
+                current = {}
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                current[k.strip()] = v.strip()
+
+        if "START" in current and "title" in current:
+            start_ms = int(current["START"])
+            chapters.append((start_ms / 1000.0, str(current["title"])))
+
+        chapters.sort(key=lambda x: x[0])
+        return chapters
+    except Exception as e:
+        log_error(f"Failed to parse ffmetadata chapters: {e}", context="_parse_ffmetadata_chapters", exception=e)
+        return []
+
+
+def write_ffmetadata_file(ffmetadata_path: str, chapters: list[dict]) -> bool:
+    """
+    chapters: [{"start_ms": int, "end_ms": int, "title": str}, ...]
+    """
+    try:
+        p = Path(ffmetadata_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = [";FFMETADATA1"]
+        for ch in chapters:
+            start_ms = int(ch.get("start_ms", 0))
+            end_ms = int(ch.get("end_ms", start_ms))
+            title = str(ch.get("title", "")).strip()
+            lines += [
+                "[CHAPTER]",
+                "TIMEBASE=1/1000",
+                f"START={start_ms}",
+                f"END={end_ms}",
+                f"title={title}",
+                "",
+            ]
+        p.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        return True
+    except Exception as e:
+        log_error(f"Failed to write ffmetadata: {e}", context="write_ffmetadata_file", exception=e)
+        return False
+
+
+def build_chapters_from_scripts(
+    scripts: list[dict],
+    segments: list[dict],
+    total_ms: int,
+) -> list[dict]:
+    """
+    세그먼트별 스크립트 길이 비율로 전체 오디오 길이를 분배해 챕터 타임라인을 생성합니다.
+    정확한 타임스탬프는 아니지만, 자동 챕터링(제목/탐색)을 위한 실용적 근사치입니다.
+    """
+    if total_ms <= 0:
+        return []
+    if not scripts:
+        return []
+
+    # segment_id 기준 정렬
+    scripts_sorted = sorted(scripts, key=lambda x: x.get("segment_id", 0))
+    seg_by_id = {int(s.get("segment_id", 0)): s for s in (segments or [])}
+
+    weights: list[int] = []
+    titles: list[str] = []
+    for s in scripts_sorted:
+        sid = int(s.get("segment_id", 0) or 0)
+        txt = (s.get("script") or "").strip()
+        w = max(1, len(txt.encode("utf-8")))
+        weights.append(w)
+
+        seg = seg_by_id.get(sid) or {}
+        title = (seg.get("title") or "").strip()
+        if not title:
+            # fallback: opening_line / segment_id
+            title = (seg.get("opening_line") or "").strip() or f"Segment {sid}"
+        titles.append(title)
+
+    total_w = sum(weights)
+    chapters: list[dict] = []
+    cursor = 0
+    for i, (w, title) in enumerate(zip(weights, titles)):
+        start_ms = cursor
+        # 마지막은 남은 시간 모두
+        if i == len(weights) - 1:
+            end_ms = total_ms
+        else:
+            dur = int(total_ms * (w / total_w))
+            # 최소 1초 확보
+            dur = max(1000, dur)
+            end_ms = min(total_ms, start_ms + dur)
+        chapters.append({"start_ms": start_ms, "end_ms": end_ms, "title": title})
+        cursor = end_ms
+    return chapters
+
+
+def add_m4b_metadata(
+    m4b_path: str,
+    audio_metadata: dict | None = None,
+    audio_title: str | None = None,
+    voice_name: str | None = None,
+    cover_art_path: str | None = None,
+    ffmetadata_path: str | None = None,
+) -> bool:
+    """M4B(MP4) 컨테이너에 메타데이터/커버/챕터를 mutagen으로 임베드합니다(한글 챕터 지원)."""
+    try:
+        from mutagen.mp4 import MP4, MP4Cover, Chapter
+
+        mp4 = MP4(m4b_path)
+
+        title = None
+        artist = None
+        album = None
+        genre = None
+        date = None
+        if audio_metadata:
+            title = audio_metadata.get("title")
+            artist = audio_metadata.get("artist")
+            album = audio_metadata.get("album")
+            genre = audio_metadata.get("genre")
+            date = audio_metadata.get("date")
+
+        if not title:
+            title = audio_title or "Untitled Audiobook"
+        if not artist:
+            artist = voice_name or "Unknown Artist"
+        if not album:
+            album = audio_title or title
+        # genre는 기본값 설정하지 않음 (None이면 태그 추가 안 함)
+        if not date:
+            date = datetime.now().strftime("%Y")
+        else:
+            if isinstance(date, str) and "-" in date:
+                date = date.split("-")[0]
+            elif isinstance(date, str) and len(date) > 4:
+                date = date[:4]
+
+        # tags
+        mp4.tags["\xa9nam"] = [str(title)]
+        mp4.tags["\xa9ART"] = [str(artist)]
+        mp4.tags["\xa9alb"] = [str(album)]
+        # 장르는 값이 있을 때만 추가
+        if genre:
+            mp4.tags["\xa9gen"] = [str(genre)]
+        mp4.tags["\xa9day"] = [str(date)]
+
+        # cover
+        if cover_art_path and Path(cover_art_path).exists():
+            cover_bytes = Path(cover_art_path).read_bytes()
+            ext = Path(cover_art_path).suffix.lower()
+            fmt = MP4Cover.FORMAT_JPEG if ext in (".jpg", ".jpeg") else MP4Cover.FORMAT_PNG
+            mp4.tags["covr"] = [MP4Cover(cover_bytes, imageformat=fmt)]
+
+        # chapters (한글 포함)
+        if ffmetadata_path and Path(ffmetadata_path).exists():
+            ch = _parse_ffmetadata_chapters(ffmetadata_path)
+            if ch:
+                # mutagen은 MP4Chapters 객체를 직접 생성하기보다, Chapter 리스트를 할당하는 방식이 안정적
+                mp4.chapters = [Chapter(start, title) for start, title in ch]
+
+        mp4.save()
+        return True
+    except ImportError:
+        print("  ⚠ Warning: mutagen not available, cannot embed M4B metadata.", flush=True)
+        return False
+    except Exception as e:
+        log_error(f"Failed to add M4B metadata: {e}", context="add_m4b_metadata", exception=e)
+        print(f"  ⚠ Warning: Failed to add M4B metadata: {e}", flush=True)
+        return False
+
+
+def build_ffmpeg_m4b_with_metadata(
+    input_audio_path: str,
+    output_m4b_path: str,
+    cover_path: str | None,
+    ffmetadata_path: str | None,
+    audio_metadata: dict | None,
+    audio_title: str | None,
+    voice_name: str | None,
+) -> bool:
+    """
+    FFmpeg로 M4B(mp4) 생성/리빌드: 커버 + 메타 + (있으면) 챕터(ffmetadata.txt) 임베딩.
+    - cover_path: jpg 권장
+    - ffmetadata_path: ;FFMETADATA1 + [CHAPTER] 형식
+    """
+    if not _ffmpeg_exists():
+        print("  ⚠ Warning: ffmpeg not found in PATH. Skipping M4B metadata embedding.", flush=True)
+        return False
+
+    title = None
+    artist = None
+    album = None
+    genre = None
+    date = None
+    if audio_metadata:
+        title = audio_metadata.get("title")
+        artist = audio_metadata.get("artist")
+        album = audio_metadata.get("album")
+        genre = audio_metadata.get("genre")
+        date = audio_metadata.get("date")
+    if not title:
+        title = audio_title or "Untitled Audiobook"
+    if not artist:
+        artist = voice_name or "Unknown Artist"
+    if not album:
+        album = audio_title or title
+    if not genre:
+        genre = "Audiobook"
+    if not date:
+        date = datetime.now().strftime("%Y")
+    else:
+        if isinstance(date, str) and "-" in date:
+            date = date.split("-")[0]
+        elif isinstance(date, str) and len(date) > 4:
+            date = date[:4]
+
+    # 1) 오디오 컨테이너 생성(변환) - 메타/챕터/커버는 mutagen으로 처리(한글 보존)
+    try:
+        args: list[str] = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
+        args += ["-i", str(input_audio_path)]
+        args += ["-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output_m4b_path)]
+        subprocess.run(args, check=True)
+    except Exception as e:
+        log_error(f"FFmpeg audio convert failed: {e}", context="build_ffmpeg_m4b_with_metadata", exception=e)
+        print(f"  ⚠ Warning: Failed to convert to M4B: {e}", flush=True)
+        return False
+
+    # 2) mutagen으로 메타/커버/챕터 임베드
+    return add_m4b_metadata(
+        m4b_path=output_m4b_path,
+        audio_metadata=audio_metadata,
+        audio_title=audio_title,
+        voice_name=voice_name,
+        cover_art_path=cover_path,
+        ffmetadata_path=ffmetadata_path,
+    )
+
+def _sanitize_tts_text(text: str) -> str:
+    """
+    Writer/파이프라인 버그로 프롬프트 지시문이 본문에 섞여 들어오는 경우를 방어적으로 제거.
+    - 정상 본문을 최대한 보존하기 위해 '문서형 프롬프트 토큰'이 텍스트 선두에 있을 때만 처리.
+    """
+    if not text:
+        return text
+
+    s = text.lstrip()
+    # 흔한 누수 패턴(이전 tts_prompt 형태)
+    leak_tokens = ("Role:", "Tone:", "Delivery:", "Act:")
+    if any(s.startswith(t) for t in leak_tokens):
+        # 첫 빈 줄(또는 첫 8줄)까지를 '지시문'으로 보고 제거
+        lines = s.splitlines()
+        kept: list[str] = []
+        dropped = 0
+        for i, ln in enumerate(lines):
+            if ln.strip() == "":
+                dropped = i + 1
+                break
+            if i >= 7:
+                dropped = i + 1
+                break
+        kept = lines[dropped:]
+        return "\n".join(kept).lstrip()
+
+    return text
+
+
+def _synthesize_speech_single_genai_audio_out(
+    text: str,
+    voice_name: str,
+    style_prompt: str,
+    model_id: str = "gemini-2.5-flash-preview-tts",
+) -> bytes:
+    """
+    Cookbook 방식(Audio-out preview)으로 TTS 생성.
+    - 응답은 PCM(L16)로 오며, 기존 파이프라인 호환을 위해 MP3로 변환해 bytes 반환.
+
+    참고(쿡북):
+    - response.candidates[0].content.parts[0].inline_data
+    - inline_data.mime_type: 'audio/L16;codec=pcm;rate=24000'
+    """
+    try:
+        # google-genai SDK (새 Gemini SDK)
+        from google import genai as genai_sdk  # type: ignore
+    except Exception as e:
+        raise RuntimeError(
+            "google-genai SDK가 필요합니다. `pip install google-genai` 후 다시 시도하세요."
+        ) from e
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GOOGLE_API_KEY가 설정되어 있지 않습니다. (.env 또는 환경 변수)")
+
+    client = genai_sdk.Client(api_key=api_key)
+
+    # 누수 방지: “읽어야 할 텍스트”만 명시적으로 분리
+    # (쿡북도 'Say ...' 형태로 지시하고, 실제 발화는 따옴표로 감싼 형태)
+    contents = f"""{style_prompt}
+
+Say the following text verbatim, and do not say anything else:
+\"\"\"{text}\"\"\"
+"""
+
+    response = client.models.generate_content(
+        model=model_id,
+        contents=contents,
+        config={
+            "response_modalities": ["Audio"],
+            "speech_config": {
+                "voice_config": {"prebuilt_voice_config": {"voice_name": voice_name}}
+            },
+        },
+    )
+
+    blob = response.candidates[0].content.parts[0].inline_data
+    mime_type = getattr(blob, "mime_type", "") or ""
+    pcm = getattr(blob, "data", None)
+    if pcm is None:
+        raise RuntimeError("Audio inline_data.data is missing from response.")
+
+    sample_rate = _parse_pcm_rate_from_mime(mime_type)
+    return _pcm16le_to_mp3_bytes(pcm, sample_rate)
+
+
+def synthesize_speech_single(
+    text: str,
+    voice_profile: dict,
+    language: str,
+    narrative_mode: str = "mentor",
+    tts_backend: str = "cloud",
+    tts_model_name: str = "gemini-2.5-pro-tts",
+    genai_tts_model_id: str = "gemini-2.5-flash-preview-tts",
+) -> bytes:
     """
     단일 텍스트를 음성으로 합성합니다 (Gemini-TTS 사용).
     
     참고: Gemini-TTS 문서 (https://docs.cloud.google.com/text-to-speech/docs/gemini-tts)
-    제한: input.text + input.prompt의 합이 4000 bytes를 초과하면 안 됩니다.
+    제한: input.text가 4000 bytes를 초과하면 안 됩니다.
+    
+    Args:
+        text: 합성할 텍스트
+        voice_profile: 음성 프로필
+        language: 언어 코드 ("ko" 또는 "en")
+        narrative_mode: 서사 모드 (기본값: "mentor")
     """
     from .config import DEBUG_LOG_ENABLED, DEBUG_LOG_PATH
     
@@ -3096,9 +3637,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
                     "location": "utils.py:synthesize_speech_single",
                     "message": "synthesize_speech_single entry",
                     "data": {
-                        "text_bytes": len(text.encode('utf-8')),
-                        "prompt_bytes": len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8')),
-                        "total_bytes": len(text.encode('utf-8')) + (len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8')))
+                        "text_bytes": len(text.encode('utf-8'))
                     },
                     "timestamp": int(time.time() * 1000)
                 }
@@ -3106,23 +3645,38 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
         except: 
             pass
     
-    client = texttospeech.TextToSpeechClient()
-    
+    text = _sanitize_tts_text(text)
+
     voice_name = voice_profile.get("name", "Achernar")
     gender = voice_profile.get("gender", "FEMALE")
+    custom_prompt = voice_profile.get("tts_prompt") if isinstance(voice_profile, dict) else None
+
+    # 경량 스타일 프롬프트(누수 피해 최소화)
+    mode_profile = NARRATIVE_MODES.get(narrative_mode, NARRATIVE_MODES[DEFAULT_NARRATIVE_MODE])
+    light_style_prompt = (mode_profile.get("tts_prompt", {}) or {}).get(language, "") or ""
+    if custom_prompt:
+        # 사용자 오버라이드는 그대로 허용(단, 누수 가능성 있음)
+        light_style_prompt = custom_prompt.strip()
+
+    if (tts_backend or "").lower() in ("genai", "gemini_audio", "gemini_api_audio", "audio_out"):
+        # Cookbook 방식(Audio-out) 백엔드
+        return _synthesize_speech_single_genai_audio_out(
+            text=text,
+            voice_name=voice_name,
+            style_prompt=light_style_prompt,
+            model_id=genai_tts_model_id,
+        )
+
+    # 기본: Google Cloud Text-to-Speech (Gemini-TTS)
+    client = texttospeech.TextToSpeechClient()
     
     if language == "ko":
         language_code = "ko-KR"
     else:
         language_code = "en-US"
     
-    # 프롬프트 결정
-    actual_prompt = tts_prompt if tts_prompt else "Say the following"
-    
-    # 길이 검증: text + prompt의 합이 4000 bytes를 초과하면 text를 자름
+    # 길이 검증: text가 4000 bytes를 초과하면 text를 자름
     text_bytes = len(text.encode('utf-8'))
-    prompt_bytes = len(actual_prompt.encode('utf-8'))
-    total_bytes = text_bytes + prompt_bytes
     
     # 디버그 로그 (개발용)
     if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
@@ -3138,10 +3692,8 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
                     "message": "synthesize_speech_single length check",
                     "data": {
                         "text_bytes": text_bytes,
-                        "prompt_bytes": prompt_bytes,
-                        "total_bytes": total_bytes,
                         "limit": 4000,
-                        "needs_truncation": total_bytes > 4000
+                        "needs_truncation": text_bytes > 4000
                     },
                     "timestamp": int(time.time() * 1000)
                 }
@@ -3149,9 +3701,9 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
         except: 
             pass
     
-    if total_bytes > 4000:
+    if text_bytes > 4000:
         # text를 자름 (안전 마진 100 bytes)
-        max_text_bytes = 4000 - prompt_bytes - 100
+        max_text_bytes = 4000 - 100
         if max_text_bytes < 100:
             max_text_bytes = 100
         
@@ -3184,8 +3736,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
                         "message": "synthesize_speech_single text truncated",
                         "data": {
                             "original_bytes": text_bytes,
-                            "truncated_bytes": len(text.encode('utf-8')),
-                            "new_total_bytes": len(text.encode('utf-8')) + prompt_bytes
+                            "truncated_bytes": len(text.encode('utf-8'))
                         },
                         "timestamp": int(time.time() * 1000)
                     }
@@ -3199,7 +3750,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
     voice = texttospeech.VoiceSelectionParams(
         language_code=language_code,
         name=voice_name,  # Gemini-TTS는 언어 코드 접두사 없이 speaker 이름만 사용
-        model_name="gemini-2.5-flash-tts",  # 기본: Flash TTS (저지연/멀티스피커 지원)
+        model_name=tts_model_name,  # 기본: Pro TTS (고품질 오디오북/팟캐스트 최적화)
     )
     
     audio_config = texttospeech.AudioConfig(
@@ -3209,13 +3760,9 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
         volume_gain_db=0.0,
     )
     
-    # Gemini-TTS: prompt와 text 필드를 모두 사용
-    # prompt: 스타일 지시사항 (예: "Say the following in a friendly way")
-    # text: 실제 합성할 텍스트
-    synthesis_input = texttospeech.SynthesisInput(
-        prompt=actual_prompt,  # Gemini-TTS의 스타일 프롬프트
-        text=text,  # 실제 합성할 텍스트
-    )
+    # Cloud Gemini-TTS: prompt 누수 이슈가 보고되어, 기본은 text-only로 안전하게 운용.
+    # (원하면 voice_profile["tts_prompt"] 또는 NARRATIVE_MODES[*]["tts_prompt"]를 넣어 사용 가능)
+    synthesis_input = texttospeech.SynthesisInput(text=text)
     
     # 디버그 로그 (개발용)
     if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
@@ -3231,8 +3778,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
                     "message": "synthesize_speech_single API call BEFORE",
                     "data": {
                         "final_text_bytes": len(text.encode('utf-8')),
-                        "final_prompt_bytes": len(actual_prompt.encode('utf-8')),
-                        "final_total_bytes": len(text.encode('utf-8')) + len(actual_prompt.encode('utf-8'))
+                        "text_content": text[:100] if len(text) > 100 else text
                     },
                     "timestamp": int(time.time() * 1000)
                 }
@@ -3240,6 +3786,7 @@ def synthesize_speech_single(text: str, voice_profile: dict, language: str, tts_
         except: 
             pass
     
+    # API 호출
     response = client.synthesize_speech(
         input=synthesis_input,
         voice=voice,
@@ -3304,10 +3851,13 @@ def synthesize_with_retry(
     chunk: str,
     profile: dict,
     lang: str,
-    prompt: str,
     max_retries: int = 5,
     chunk_index: int = None,
-    total_chunks: int = None
+    total_chunks: int = None,
+    narrative_mode: str = "mentor",
+    tts_backend: str = "cloud",
+    tts_model_name: str = "gemini-2.5-pro-tts",
+    genai_tts_model_id: str = "gemini-2.5-flash-preview-tts",
 ) -> tuple[bytes, int]:
     """
     지수 백오프(Exponential Backoff)를 적용한 단일 TTS 요청 함수.
@@ -3317,20 +3867,19 @@ def synthesize_with_retry(
         chunk: 합성할 텍스트 청크
         profile: 음성 프로필
         lang: 언어 코드
-        prompt: TTS 프롬프트
         max_retries: 최대 재시도 횟수
         chunk_index: 청크 인덱스 (로깅용)
         total_chunks: 전체 청크 수 (로깅용)
+        narrative_mode: 서사 모드 (기본값: "mentor")
     
     Returns:
-        (audio_data, input_bytes): 오디오 데이터와 입력 바이트 수 (text + prompt)
+        (audio_data, input_bytes): 오디오 데이터와 입력 바이트 수
     """
     delay = 1.0  # 초기 대기 시간 (초)
     
     # 입력 바이트 수 계산 (API 호출 전에 미리 계산)
     text_bytes = len(chunk.encode('utf-8'))
-    prompt_bytes = len(prompt.encode('utf-8')) if prompt else 0
-    input_bytes = text_bytes + prompt_bytes
+    input_bytes = text_bytes
     
     # 청크 정보 문자열 (로깅용)
     chunk_info = f"Chunk {chunk_index+1}/{total_chunks}" if chunk_index is not None and total_chunks is not None else "Chunk"
@@ -3352,7 +3901,15 @@ def synthesize_with_retry(
             # Rate limit 체크 (재시도 시에도 체크)
             _wait_for_rate_limit()
             
-            result = synthesize_speech_single(chunk, profile, lang, prompt)
+            result = synthesize_speech_single(
+                chunk,
+                profile,
+                lang,
+                narrative_mode=narrative_mode,
+                tts_backend=tts_backend,
+                tts_model_name=tts_model_name,
+                genai_tts_model_id=genai_tts_model_id,
+            )
             
             if result:
                 request_duration = time.time() - request_start_time
@@ -3446,7 +4003,10 @@ def text_to_speech_from_chunks(
     output_filename: str,
     voice_profile: dict,
     language: str,
-    tts_prompt: str = ""
+    narrative_mode: str = "mentor",
+    tts_backend: str = "cloud",
+    tts_model_name: str = "gemini-2.5-pro-tts",
+    genai_tts_model_id: str = "gemini-2.5-flash-preview-tts",
 ) -> None:
     """텍스트 청크들을 TTS로 변환하고 오디오 파일로 저장합니다.
     
@@ -3454,14 +4014,20 @@ def text_to_speech_from_chunks(
     
     주의: text_chunks는 이미 청킹이 완료된 상태여야 하며, 
     이 함수는 청크를 그대로 TTS로 전달합니다. 추가 청킹이나 병합을 수행하지 않습니다.
+    
+    Args:
+        text_chunks: 텍스트 청크 리스트
+        output_filename: 출력 파일명
+        voice_profile: 음성 프로필
+        language: 언어 코드 ("ko" 또는 "en")
+        narrative_mode: 서사 모드 (기본값: "mentor")
     """
     if not text_chunks:
         print("  ⚠ Warning: text_chunks is empty", flush=True)
         return
     
     # 청크 검증: 각 청크가 적절한지 확인
-    prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else len("Say the following".encode('utf-8'))
-    max_allowed_bytes = 4000 - prompt_bytes - 100  # 안전 마진
+    max_allowed_bytes = 4000 - 100  # 안전 마진
     
     invalid_chunks = []
     for i, chunk in enumerate(text_chunks):
@@ -3523,8 +4089,7 @@ def text_to_speech_from_chunks(
         for i, chunk in enumerate(text_chunks):
             # 입력 바이트 수 미리 계산
             text_bytes = len(chunk.encode('utf-8'))
-            prompt_bytes = len(tts_prompt.encode('utf-8')) if tts_prompt else 0
-            input_bytes = text_bytes + prompt_bytes
+            input_bytes = text_bytes
             total_input_bytes += input_bytes
             
             # 모든 요청 전에 Rate Limit 체크 (첫 요청도 포함)
@@ -3543,10 +4108,13 @@ def text_to_speech_from_chunks(
                 chunk, 
                 voice_profile, 
                 language, 
-                tts_prompt,
                 5,  # max_retries
                 i,  # chunk_index
-                total_requests  # total_chunks
+                total_requests,  # total_chunks
+                narrative_mode,  # narrative_mode
+                tts_backend,
+                tts_model_name,
+                genai_tts_model_id,
             )
             future_to_idx[future] = (i, input_bytes)
         
@@ -3767,7 +4335,10 @@ def text_to_speech_radio_show(
     output_filename: str,
     voice_profile: dict,
     language: str,
-    tts_prompt: str = ""
+    narrative_mode: str = "radio_show",
+    tts_backend: str = "cloud",
+    tts_model_name: str = "gemini-2.5-pro-tts",
+    genai_tts_model_id: str = "gemini-2.5-flash-preview-tts",
 ) -> None:
     """
     라디오쇼 모드: 화자별로 다른 음성을 사용해 순차적으로 합성하고 병합합니다.
@@ -3827,10 +4398,13 @@ def text_to_speech_radio_show(
                 text,
                 speaker_voice,
                 language,
-                tts_prompt,
                 5,
                 idx,
-                total_requests
+                total_requests,
+                narrative_mode,
+                tts_backend,
+                tts_model_name,
+                genai_tts_model_id,
             )
             if audio_data:
                 all_results[idx] = audio_data
@@ -3884,24 +4458,22 @@ def text_to_speech_radio_show(
 
 def _build_dialogue_batches(
     dialogues: list[dict],
-    tts_prompt: str,
     batch_size: int = 9,
     byte_limit: int = 4000,
     safety_margin: int = 200
 ) -> list[str]:
     """
-    대화 리스트를 배치로 분할 (기본 9개/배치) + 바이트 한도(4000 - margin - prompt).
+    대화 리스트를 배치로 분할 (기본 9개/배치) + 바이트 한도(4000 - margin).
     - byte_limit: Gemini-TTS 입력 한도 (기본 4000B)
-    - safety_margin: prompt 이외 안전 여유 (기본 200B)
+    - safety_margin: 안전 여유 (기본 200B)
     """
-    prompt_bytes = len(tts_prompt.encode("utf-8")) if tts_prompt else len("Say the following".encode("utf-8"))
-    max_bytes = byte_limit - prompt_bytes - safety_margin
+    max_bytes = byte_limit - safety_margin
     if max_bytes < 800:  # 너무 작아지지 않도록 최소 확보
         max_bytes = 800
     
     batches = []
     current_lines = []
-    current_bytes = prompt_bytes
+    current_bytes = 0
     current_count = 0
     
     for dlg in dialogues:
@@ -3918,7 +4490,7 @@ def _build_dialogue_batches(
             if current_lines:
                 batches.append("\n".join(current_lines))
                 current_lines = []
-                current_bytes = prompt_bytes
+                current_bytes = 0
                 current_count = 0
         
         current_lines.append(line)
@@ -3934,15 +4506,17 @@ def text_to_speech_radio_show_structured(
     dialogues: list[dict],
     output_filename: str,
     language: str,
-    tts_prompt: str = "",
-    model_name: str = "gemini-2.5-flash-tts",
+    model_name: str = "gemini-2.5-pro-tts",
     representative_voice: str | None = None,
     host1_voice: str | None = None,
     host2_voice: str | None = None,
     batch_size: int = 9,
     byte_limit: int = 4000,
     safety_margin: int = 200,
-    max_workers: int = 9
+    max_workers: int = 9,
+    narrative_mode: str = "radio_show",
+    tts_backend: str = "cloud",
+    genai_tts_model_id: str = "gemini-2.5-flash-preview-tts",
 ) -> None:
     """
     라디오쇼 멀티스피커: 구조적 청킹(여러 요청) + Host 라벨을 명시적으로 유지.
@@ -3956,7 +4530,6 @@ def text_to_speech_radio_show_structured(
     
     batches = _build_dialogue_batches(
         dialogues,
-        tts_prompt,
         batch_size=batch_size,
         byte_limit=byte_limit,
         safety_margin=safety_margin
@@ -3964,6 +4537,20 @@ def text_to_speech_radio_show_structured(
     if not batches:
         print("  ⚠ Warning: no batches created for radio show", flush=True)
         return
+
+    # Cookbook(Audio-out) 백엔드: 구조적 배치 텍스트를 그대로 TTS 청크로 처리
+    if (tts_backend or "").lower() in ("genai", "gemini_audio", "gemini_api_audio", "audio_out"):
+        vp = {"name": (representative_voice or "Kore"), "gender": "FEMALE"}
+        return text_to_speech_from_chunks(
+            text_chunks=batches,
+            output_filename=output_filename,
+            voice_profile=vp,
+            language=language,
+            narrative_mode=narrative_mode,
+            tts_backend=tts_backend,
+            tts_model_name=model_name,  # 의미 없지만 인터페이스 통일
+            genai_tts_model_id=genai_tts_model_id,
+        )
     
     client = texttospeech.TextToSpeechClient()
     language_code = "ko-KR" if language == "ko" else "en-US"
@@ -3982,16 +4569,6 @@ def text_to_speech_radio_show_structured(
     request_submit_times: dict[int, float] = {}
     start_time = time.time()
     
-    # 화자별 음성 안내를 프롬프트에 명시 (멀티스피커 톤 분리)
-    speaker_hint = ""
-    if host1_voice or host2_voice:
-        speaker_hint = "Use two distinct speakers: "
-        if host1_voice:
-            speaker_hint += f'Host 1 = "{host1_voice}" (female). '
-        if host2_voice:
-            speaker_hint += f'Host 2 = "{host2_voice}" (male). '
-        speaker_hint += "Keep the provided Host labels in the rendered audio."
-
     # 비동기 제출로 대기 없이 연속 전송(전송 간격은 9RPM 준수)
     from concurrent.futures import ThreadPoolExecutor, as_completed
     futures: dict = {}
@@ -4003,18 +4580,15 @@ def text_to_speech_radio_show_structured(
             _wait_for_rate_limit()
             request_submit_times[i] = time.time()
             
-            # 프롬프트를 앞에 붙여 모델 스타일 유지
-            if tts_prompt or speaker_hint:
-                combined_prompt = "\n".join([p for p in [tts_prompt.strip() if tts_prompt else "", speaker_hint] if p])
-                combined = combined_prompt + "\n" + batch_text
-            else:
-                combined = batch_text
+            # text가 4000 bytes를 초과하면 안 됨
+            text_bytes = len(batch_text.encode("utf-8"))
+            total_bytes = text_bytes
             
-            total_bytes = len(combined.encode("utf-8"))
             if total_bytes > 4000:
                 raise ValueError(f"Batch {i+1} exceeds 4000B even after chunking ({total_bytes}B). Shorten turns further.")
             
-            synthesis_input = texttospeech.SynthesisInput(text=combined)
+            # Cloud Gemini-TTS: prompt 누수 방지용으로 text만 전달
+            synthesis_input = texttospeech.SynthesisInput(text=batch_text)
             voice = texttospeech.VoiceSelectionParams(
                 language_code=language_code,
                 name=voice_name,
@@ -4271,3 +4845,570 @@ def parse_script_dialogues(script_text: str, narrative_mode: str, voice_profile:
         })
     
     return dialogues
+
+
+def generate_voronoi_cover_art(output_path: str, width: int = 1000, height: int = 1000, seed: int = None, title: str = None, voice_name: str = None) -> str:
+    """
+    Voronoi Diagram을 사용한 기하학적 커버 아트를 생성합니다.
+    
+    큐레이션된 컬러 팔레트에서 랜덤 색상을 선택하여 매번 고유한 디자인을 만듭니다.
+    중앙에 검은색 밴드를 배치하고 그 안에 제목과 발화자 이름을 표시합니다.
+    
+    Args:
+        output_path: 생성된 이미지를 저장할 경로
+        width: 이미지 너비 (기본값: 1000)
+        height: 이미지 높이 (기본값: 1000)
+        seed: 랜덤 시드 (None이면 현재 시간 기반)
+        title: 이미지에 표시할 제목 (None이면 표시하지 않음)
+        voice_name: 발화자 이름 (제목 아래에 표시)
+        
+    Returns:
+        생성된 이미지 파일 경로
+    """
+    try:
+        import numpy as np
+        from scipy.spatial import Voronoi
+        from PIL import Image, ImageDraw
+        
+        # 큐레이션된 컬러 팔레트 (10-15개 색상 조합)
+        # 전문가가 큐레이션한 세련된 색상 조합
+        color_palettes = [
+            # 따뜻한 톤
+            [(255, 107, 107), (255, 159, 64), (255, 206, 84), (75, 192, 192), (54, 162, 235)],
+            # 차가운 톤
+            [(99, 102, 241), (139, 92, 246), (168, 85, 247), (196, 181, 253), (221, 214, 254)],
+            # 자연스러운 톤
+            [(34, 197, 94), (59, 130, 246), (168, 85, 247), (236, 72, 153), (251, 146, 60)],
+            # 모노크롬
+            [(30, 41, 59), (51, 65, 85), (71, 85, 105), (148, 163, 184), (203, 213, 225)],
+            # 생동감 있는 톤
+            [(239, 68, 68), (249, 115, 22), (234, 179, 8), (34, 197, 94), (59, 130, 246)],
+            # 파스텔 톤
+            [(254, 202, 202), (254, 240, 138), (187, 247, 208), (196, 181, 253), (221, 214, 254)],
+            # 어두운 톤
+            [(15, 23, 42), (30, 41, 59), (51, 65, 85), (100, 116, 139), (148, 163, 184)],
+            # 밝은 톤
+            [(255, 255, 255), (241, 245, 249), (226, 232, 240), (203, 213, 225), (148, 163, 184)],
+        ]
+        
+        # 랜덤 시드 설정
+        if seed is None:
+            seed = int(time.time() * 1000) % 1000000
+        np.random.seed(seed)
+        random.seed(seed)
+        
+        # 팔레트 선택
+        selected_palette = random.choice(color_palettes)
+        
+        # 50-80개의 랜덤 시드 포인트 생성 (더 많은 파편으로 꽉 채움)
+        num_points = random.randint(50, 80)
+        points = np.random.rand(num_points, 2) * np.array([width, height])
+        
+        # 경계를 벗어나지 않도록 조정 (margin 최소화)
+        margin = 10
+        points[:, 0] = np.clip(points[:, 0], margin, width - margin)
+        points[:, 1] = np.clip(points[:, 1], margin, height - margin)
+        
+        # Voronoi 다이어그램 생성
+        # 경계 처리를 위해 경계 밖에 더미 포인트 추가
+        boundary_points = np.array([
+            [-width, -height], [width * 2, -height], [-width, height * 2], [width * 2, height * 2],
+            [width // 2, -height], [width // 2, height * 2], [-width, height // 2], [width * 2, height // 2]
+        ])
+        all_points = np.vstack([points, boundary_points])
+        
+        vor = Voronoi(all_points)
+        
+        # 이미지 생성
+        img = Image.new('RGB', (width, height), color='white')
+        draw = ImageDraw.Draw(img)
+        
+        # 각 Voronoi 영역에 색상 할당
+        for region_idx in vor.point_region[:num_points]:
+            region = vor.regions[region_idx]
+            if -1 not in region and len(region) > 0:
+                # 랜덤 색상 선택
+                color = random.choice(selected_palette)
+                
+                # 영역 좌표 추출
+                vertices = [tuple(vor.vertices[i]) for i in region]
+                
+                # 경계 내부의 좌표만 필터링
+                valid_vertices = [(x, y) for x, y in vertices if 0 <= x <= width and 0 <= y <= height]
+                
+                if len(valid_vertices) >= 3:
+                    # 다각형 그리기
+                    draw.polygon(valid_vertices, fill=color, outline=None)
+        
+        # 중앙 검은색 밴드 그리기 (높이의 약 1/3)
+        band_height = height // 3
+        band_y_start = (height - band_height) // 2
+        band_y_end = band_y_start + band_height
+        draw.rectangle([(0, band_y_start), (width, band_y_end)], fill=(0, 0, 0))
+        
+        # 제목 및 발화자 이름 텍스트 추가 (검은색 밴드 내부)
+        if title:
+            try:
+                from PIL import ImageFont
+                
+                # 밴드 내부 여유 공간 (padding)
+                band_padding = 20
+                band_inner_width = width - (band_padding * 2)
+                band_inner_height = band_height - (band_padding * 2)
+                band_inner_y_start = band_y_start + band_padding
+                band_inner_y_end = band_y_end - band_padding
+                
+                # 제목 폰트 크기: 밴드 내부 너비에 맞게 조정
+                title_font_size = max(30, min(60, int(band_inner_width * 0.08)))
+                
+                # 발화자 이름 폰트 크기: 제목의 60%
+                voice_font_size = max(18, int(title_font_size * 0.6))
+                
+                # 기본 폰트 사용 (시스템 폰트가 없을 경우 대비)
+                try:
+                    # Windows 기본 폰트 시도
+                    if os.name == 'nt':
+                        title_font = ImageFont.truetype("arial.ttf", title_font_size)
+                        voice_font = ImageFont.truetype("arial.ttf", voice_font_size)
+                    else:
+                        # Linux/Mac 기본 폰트 시도
+                        title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", title_font_size)
+                        voice_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", voice_font_size)
+                except:
+                    # 기본 폰트 사용
+                    title_font = ImageFont.load_default()
+                    voice_font = ImageFont.load_default()
+                
+                # 제목 텍스트 준비 (밴드 내부 너비에 맞게 줄바꿈)
+                # 실제 텍스트 너비를 측정하여 줄바꿈 결정
+                test_bbox = draw.textbbox((0, 0), title, font=title_font) if hasattr(draw, 'textbbox') else None
+                if test_bbox:
+                    test_width = test_bbox[2] - test_bbox[0]
+                else:
+                    try:
+                        test_width, _ = draw.textsize(title, font=title_font)
+                    except:
+                        test_width = len(title) * title_font_size * 0.6  # 근사값
+                
+                if test_width > band_inner_width:
+                    # 텍스트가 너무 길면 줄바꿈
+                    words = title.split()
+                    lines = []
+                    current_line = ""
+                    for word in words:
+                        test_line = (current_line + " " + word).strip() if current_line else word
+                        test_bbox = draw.textbbox((0, 0), test_line, font=title_font) if hasattr(draw, 'textbbox') else None
+                        if test_bbox:
+                            line_width = test_bbox[2] - test_bbox[0]
+                        else:
+                            try:
+                                line_width, _ = draw.textsize(test_line, font=title_font)
+                            except:
+                                line_width = len(test_line) * title_font_size * 0.6
+                        
+                        if line_width <= band_inner_width:
+                            current_line = test_line
+                        else:
+                            if current_line:
+                                lines.append(current_line)
+                            current_line = word
+                    if current_line:
+                        lines.append(current_line)
+                    title_lines = lines[:2]  # 최대 2줄
+                else:
+                    title_lines = [title]
+                
+                # 텍스트 위치 계산 (밴드 내부 중앙)
+                title_line_height = title_font_size + 10
+                total_title_height = len(title_lines) * title_line_height
+                voice_text_height = voice_font_size + 8
+                spacing = 10
+                total_text_height = total_title_height + (voice_text_height if voice_name else 0) + (spacing if voice_name else 0)
+                
+                # 밴드 내부 중앙에 배치
+                band_inner_center_y = band_inner_y_start + band_inner_height // 2
+                title_start_y = band_inner_center_y - total_text_height // 2
+                
+                # 제목 텍스트 그리기
+                for i, line in enumerate(title_lines):
+                    # 텍스트 크기 측정 (PIL 버전 호환성)
+                    try:
+                        # PIL 10.0.0+ (textbbox 사용)
+                        bbox = draw.textbbox((0, 0), line, font=title_font)
+                        text_width = bbox[2] - bbox[0]
+                        text_height = bbox[3] - bbox[1]
+                    except AttributeError:
+                        # 구버전 PIL (textsize 사용)
+                        text_width, text_height = draw.textsize(line, font=title_font)
+                    
+                    # 텍스트가 밴드 내부 너비를 벗어나지 않도록 확인
+                    if text_width > band_inner_width:
+                        # 텍스트가 너무 길면 자르기
+                        line = line[:int(len(line) * band_inner_width / text_width * 0.9)] + "..."
+                        try:
+                            bbox = draw.textbbox((0, 0), line, font=title_font)
+                            text_width = bbox[2] - bbox[0]
+                        except AttributeError:
+                            text_width, _ = draw.textsize(line, font=title_font)
+                    
+                    text_x = (width - text_width) // 2  # 중앙 정렬
+                    text_y = title_start_y + i * title_line_height
+                    
+                    # 텍스트가 밴드 경계를 벗어나지 않도록 확인
+                    if text_y < band_inner_y_start:
+                        text_y = band_inner_y_start
+                    if text_y + text_height > band_inner_y_end:
+                        text_y = band_inner_y_end - text_height
+                    
+                    # 텍스트가 이미지 경계를 벗어나지 않도록 확인
+                    text_x = max(band_padding, min(text_x, width - text_width - band_padding))
+                    
+                    # 흰색 텍스트 (검은색 밴드 위에)
+                    draw.text(
+                        (text_x, text_y),
+                        line,
+                        fill=(255, 255, 255),
+                        font=title_font
+                    )
+                
+                # 발화자 이름 텍스트 그리기 (제목 아래)
+                if voice_name:
+                    try:
+                        bbox = draw.textbbox((0, 0), voice_name, font=voice_font)
+                        voice_text_width = bbox[2] - bbox[0]
+                        voice_text_height = bbox[3] - bbox[1]
+                    except AttributeError:
+                        voice_text_width, voice_text_height = draw.textsize(voice_name, font=voice_font)
+                    
+                    # 발화자 이름이 너무 길면 자르기
+                    display_voice_name = voice_name
+                    if voice_text_width > band_inner_width:
+                        display_voice_name = voice_name[:int(len(voice_name) * band_inner_width / voice_text_width * 0.9)] + "..."
+                        try:
+                            bbox = draw.textbbox((0, 0), display_voice_name, font=voice_font)
+                            voice_text_width = bbox[2] - bbox[0]
+                        except AttributeError:
+                            voice_text_width, _ = draw.textsize(display_voice_name, font=voice_font)
+                    
+                    voice_text_x = (width - voice_text_width) // 2  # 중앙 정렬
+                    voice_text_y = title_start_y + total_title_height + spacing
+                    
+                    # 텍스트가 밴드 경계를 벗어나지 않도록 확인
+                    if voice_text_y < band_inner_y_start:
+                        voice_text_y = band_inner_y_start
+                    if voice_text_y + voice_text_height > band_inner_y_end:
+                        voice_text_y = band_inner_y_end - voice_text_height
+                    
+                    # 텍스트가 이미지 경계를 벗어나지 않도록 확인
+                    voice_text_x = max(band_padding, min(voice_text_x, width - voice_text_width - band_padding))
+                    
+                    # 흰색 텍스트 (검은색 밴드 위에)
+                    draw.text(
+                        (voice_text_x, voice_text_y),
+                        display_voice_name,
+                        fill=(255, 255, 255),
+                        font=voice_font
+                    )
+            except Exception as e:
+                log_error(f"Failed to add title to cover art: {e}", context="generate_voronoi_cover_art", exception=e)
+                print(f"  ⚠ Warning: Failed to add title text to cover art: {e}", flush=True)
+        
+        # 이미지 저장 (JPEG로 저장)
+        output_path_obj = Path(output_path)
+        output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        # JPEG로 저장 (품질 95)
+        if output_path_obj.suffix.lower() in ('.jpg', '.jpeg'):
+            img.save(output_path, 'JPEG', quality=95, optimize=True)
+        else:
+            img.save(output_path, 'PNG')
+        
+        return output_path
+        
+    except ImportError as e:
+        # 라이브러리가 없으면 기본 그라데이션 이미지 생성
+        log_error(f"Voronoi cover art generation failed (missing library): {e}", context="generate_voronoi_cover_art", exception=e)
+        try:
+            from PIL import Image, ImageDraw
+            
+            # 기본 그라데이션 이미지 생성
+            img = Image.new('RGB', (width, height), color='white')
+            draw = ImageDraw.Draw(img)
+            
+            # 간단한 그라데이션
+            for y in range(height):
+                r = int(100 + (y / height) * 155)
+                g = int(150 + (y / height) * 105)
+                b = int(200 + (y / height) * 55)
+                draw.line([(0, y), (width, y)], fill=(r, g, b))
+            
+            # 중앙 검은색 밴드 그리기 (높이의 약 1/3)
+            band_height = height // 3
+            band_y_start = (height - band_height) // 2
+            band_y_end = band_y_start + band_height
+            draw.rectangle([(0, band_y_start), (width, band_y_end)], fill=(0, 0, 0))
+            
+            # 제목 및 발화자 이름 추가 (폴백 이미지에도)
+            if title:
+                try:
+                    from PIL import ImageFont
+                    
+                    # 밴드 내부 여유 공간 (padding)
+                    band_padding = 20
+                    band_inner_width = width - (band_padding * 2)
+                    band_inner_height = band_height - (band_padding * 2)
+                    band_inner_y_start = band_y_start + band_padding
+                    band_inner_y_end = band_y_end - band_padding
+                    
+                    title_font_size = max(30, min(60, int(band_inner_width * 0.08)))
+                    voice_font_size = max(18, int(title_font_size * 0.6))
+                    try:
+                        if os.name == 'nt':
+                            title_font = ImageFont.truetype("arial.ttf", title_font_size)
+                            voice_font = ImageFont.truetype("arial.ttf", voice_font_size)
+                        else:
+                            title_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", title_font_size)
+                            voice_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", voice_font_size)
+                    except:
+                        title_font = ImageFont.load_default()
+                        voice_font = ImageFont.load_default()
+                    
+                    # 텍스트 너비 측정하여 줄바꿈 결정
+                    test_bbox = draw.textbbox((0, 0), title, font=title_font) if hasattr(draw, 'textbbox') else None
+                    if test_bbox:
+                        test_width = test_bbox[2] - test_bbox[0]
+                    else:
+                        try:
+                            test_width, _ = draw.textsize(title, font=title_font)
+                        except:
+                            test_width = len(title) * title_font_size * 0.6
+                    
+                    if test_width > band_inner_width:
+                        words = title.split()
+                        lines = []
+                        current_line = ""
+                        for word in words:
+                            test_line = (current_line + " " + word).strip() if current_line else word
+                            test_bbox = draw.textbbox((0, 0), test_line, font=title_font) if hasattr(draw, 'textbbox') else None
+                            if test_bbox:
+                                line_width = test_bbox[2] - test_bbox[0]
+                            else:
+                                try:
+                                    line_width, _ = draw.textsize(test_line, font=title_font)
+                                except:
+                                    line_width = len(test_line) * title_font_size * 0.6
+                            
+                            if line_width <= band_inner_width:
+                                current_line = test_line
+                            else:
+                                if current_line:
+                                    lines.append(current_line)
+                                current_line = word
+                        if current_line:
+                            lines.append(current_line)
+                        title_lines = lines[:2]
+                    else:
+                        title_lines = [title]
+                    
+                    title_line_height = title_font_size + 10
+                    total_title_height = len(title_lines) * title_line_height
+                    voice_text_height = voice_font_size + 8
+                    spacing = 10
+                    total_text_height = total_title_height + (voice_text_height if voice_name else 0) + (spacing if voice_name else 0)
+                    
+                    band_inner_center_y = band_inner_y_start + band_inner_height // 2
+                    title_start_y = band_inner_center_y - total_text_height // 2
+                    
+                    for i, line in enumerate(title_lines):
+                        try:
+                            bbox = draw.textbbox((0, 0), line, font=title_font)
+                            text_width = bbox[2] - bbox[0]
+                            text_height = bbox[3] - bbox[1]
+                        except AttributeError:
+                            text_width, text_height = draw.textsize(line, font=title_font)
+                        
+                        if text_width > band_inner_width:
+                            line = line[:int(len(line) * band_inner_width / text_width * 0.9)] + "..."
+                            try:
+                                bbox = draw.textbbox((0, 0), line, font=title_font)
+                                text_width = bbox[2] - bbox[0]
+                            except AttributeError:
+                                text_width, _ = draw.textsize(line, font=title_font)
+                        
+                        text_x = (width - text_width) // 2
+                        text_y = title_start_y + i * title_line_height
+                        
+                        if text_y < band_inner_y_start:
+                            text_y = band_inner_y_start
+                        if text_y + text_height > band_inner_y_end:
+                            text_y = band_inner_y_end - text_height
+                        
+                        text_x = max(band_padding, min(text_x, width - text_width - band_padding))
+                        draw.text((text_x, text_y), line, fill=(255, 255, 255), font=title_font)
+                    
+                    if voice_name:
+                        try:
+                            bbox = draw.textbbox((0, 0), voice_name, font=voice_font)
+                            voice_text_width = bbox[2] - bbox[0]
+                            voice_text_height = bbox[3] - bbox[1]
+                        except AttributeError:
+                            voice_text_width, voice_text_height = draw.textsize(voice_name, font=voice_font)
+                        
+                        display_voice_name = voice_name
+                        if voice_text_width > band_inner_width:
+                            display_voice_name = voice_name[:int(len(voice_name) * band_inner_width / voice_text_width * 0.9)] + "..."
+                            try:
+                                bbox = draw.textbbox((0, 0), display_voice_name, font=voice_font)
+                                voice_text_width = bbox[2] - bbox[0]
+                            except AttributeError:
+                                voice_text_width, _ = draw.textsize(display_voice_name, font=voice_font)
+                        
+                        voice_text_x = (width - voice_text_width) // 2
+                        voice_text_y = title_start_y + total_title_height + spacing
+                        
+                        if voice_text_y < band_inner_y_start:
+                            voice_text_y = band_inner_y_start
+                        if voice_text_y + voice_text_height > band_inner_y_end:
+                            voice_text_y = band_inner_y_end - voice_text_height
+                        
+                        voice_text_x = max(band_padding, min(voice_text_x, width - voice_text_width - band_padding))
+                        draw.text((voice_text_x, voice_text_y), display_voice_name, fill=(255, 255, 255), font=voice_font)
+                except:
+                    pass
+            
+            output_path_obj = Path(output_path)
+            output_path_obj.parent.mkdir(parents=True, exist_ok=True)
+            # JPEG로 저장 (품질 95)
+            if output_path_obj.suffix.lower() in ('.jpg', '.jpeg'):
+                img.save(output_path, 'JPEG', quality=95, optimize=True)
+            else:
+                img.save(output_path, 'PNG')
+            print(f"  ⚠ Warning: Generated fallback gradient cover art (Voronoi libraries not available)", flush=True)
+            return output_path
+        except Exception as fallback_error:
+            log_error(f"Fallback cover art generation also failed: {fallback_error}", context="generate_voronoi_cover_art", exception=fallback_error)
+            return None
+    except Exception as e:
+        log_error(f"Voronoi cover art generation failed: {e}", context="generate_voronoi_cover_art", exception=e)
+        print(f"  ⚠ Warning: Failed to generate Voronoi cover art: {e}", flush=True)
+        return None
+
+
+def add_mp3_metadata(
+    mp3_path: str,
+    audio_metadata: dict = None,
+    audio_title: str = None,
+    voice_name: str = None,
+    cover_art_path: str = None
+) -> bool:
+    """
+    MP3 파일에 ID3 태그 메타데이터와 커버 아트를 추가합니다.
+    
+    Args:
+        mp3_path: MP3 파일 경로
+        audio_metadata: 오디오 메타데이터 딕셔너리 (title, artist, album, genre, date 포함)
+        audio_title: 오디오 제목 (audio_metadata.title이 없을 때 사용)
+        voice_name: 음성 이름 (audio_metadata.artist가 없을 때 사용)
+        cover_art_path: 커버 아트 이미지 경로 (None이면 생성하지 않음)
+        
+    Returns:
+        성공 여부 (bool)
+    """
+    try:
+        from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCON, TDRC, APIC
+        from mutagen.mp3 import MP3
+        
+        # MP3 파일 열기
+        audio_file = MP3(mp3_path, ID3=ID3)
+        
+        # ID3 태그가 없으면 생성
+        if audio_file.tags is None:
+            audio_file.add_tags()
+        
+        # 메타데이터 추출
+        title = None
+        artist = None
+        album = None
+        genre = None
+        date = None
+        
+        if audio_metadata:
+            title = audio_metadata.get("title")
+            artist = audio_metadata.get("artist")
+            album = audio_metadata.get("album")
+            genre = audio_metadata.get("genre")
+            date = audio_metadata.get("date")
+        
+        # 기본값 설정
+        if not title:
+            title = audio_title or "Untitled Audiobook"
+        if not artist:
+            artist = voice_name or "Unknown Artist"
+        if not album:
+            album = audio_title or "Untitled Album"
+        # genre는 기본값 설정하지 않음 (None이면 태그 추가 안 함)
+        if not date:
+            date = datetime.now().strftime("%Y")
+        else:
+            # 날짜 형식 처리: "YYYY-MM-DD" -> "YYYY"
+            if isinstance(date, str) and "-" in date:
+                date = date.split("-")[0]
+            elif isinstance(date, str) and len(date) > 4:
+                date = date[:4]
+        
+        # 기존 태그 삭제 후 새로 추가 (덮어쓰기)
+        if "TIT2" in audio_file.tags:
+            del audio_file.tags["TIT2"]
+        if "TPE1" in audio_file.tags:
+            del audio_file.tags["TPE1"]
+        if "TALB" in audio_file.tags:
+            del audio_file.tags["TALB"]
+        if "TCON" in audio_file.tags:
+            del audio_file.tags["TCON"]
+        if "TDRC" in audio_file.tags:
+            del audio_file.tags["TDRC"]
+        
+        # ID3 태그 추가 (UTF-8 인코딩)
+        audio_file.tags.add(TIT2(encoding=3, text=str(title)))  # 제목
+        audio_file.tags.add(TPE1(encoding=3, text=str(artist)))  # 아티스트
+        audio_file.tags.add(TALB(encoding=3, text=str(album)))    # 앨범
+        # 장르는 값이 있을 때만 추가
+        if genre:
+            audio_file.tags.add(TCON(encoding=3, text=str(genre)))    # 장르
+        audio_file.tags.add(TDRC(encoding=3, text=str(date)))     # 연도
+        
+        # 커버 아트 추가
+        if cover_art_path and Path(cover_art_path).exists():
+            try:
+                # 기존 커버 아트 삭제
+                if "APIC:" in audio_file.tags:
+                    del audio_file.tags["APIC:"]
+                
+                with open(cover_art_path, 'rb') as f:
+                    cover_data = f.read()
+                mime = _guess_image_mime(cover_art_path)
+                
+                # APIC 프레임 추가 (커버 아트)
+                audio_file.tags.add(APIC(
+                    encoding=3,
+                    mime=mime,
+                    type=3,  # Cover (front)
+                    desc='Cover',
+                    data=cover_data
+                ))
+                print(f"  ✓ Cover art embedded: {len(cover_data)} bytes", flush=True)
+            except Exception as e:
+                log_error(f"Failed to add cover art: {e}", context="add_mp3_metadata", exception=e)
+                print(f"  ⚠ Warning: Failed to add cover art: {e}", flush=True)
+        
+        # 저장
+        audio_file.save(v2_version=3)  # ID3v2.3 형식으로 저장
+        print(f"  ✓ Metadata added: Title='{title}', Artist='{artist}', Album='{album}', Genre='{genre}', Date='{date}'", flush=True)
+        return True
+        
+    except ImportError:
+        print(f"  ⚠ Warning: mutagen library not available, skipping metadata addition", flush=True)
+        return False
+    except Exception as e:
+        log_error(f"Failed to add MP3 metadata: {e}", context="add_mp3_metadata", exception=e)
+        print(f"  ⚠ Warning: Failed to add MP3 metadata: {e}", flush=True)
+        return False

@@ -33,6 +33,19 @@ def showrunner_node(state: AgentState) -> AgentState:
         start_time = log_workflow_step_start("showrunner")
         print("\n[Showrunner] Starting...", flush=True)
         
+        # ✅ segments가 이미 있으면 스킵 (input.txt가 showrunner 출력 형식인 경우)
+        existing_segments = state.get("segments", [])
+        if existing_segments and len(existing_segments) > 0:
+            print("\n[Showrunner] Skipping - segments already provided in input", flush=True)
+            print(f"  ✓ Using {len(existing_segments)} pre-existing segments", flush=True)
+            
+            # audio_title과 audio_metadata가 state에 없으면 기본값 설정
+            if not state.get("audio_title"):
+                state["audio_title"] = "Generated_Audiobook"
+            
+            log_workflow_step_end("showrunner", start_time)
+            return state
+        
         original_text = state["original_text"]
         config = state["config"]
         language = config.get("language", "ko")

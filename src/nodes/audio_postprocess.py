@@ -12,7 +12,9 @@ from ..utils import (
     save_latest_run_path,
     log_error,
     log_workflow_step_start,
-    log_workflow_step_end
+    log_workflow_step_end,
+    ensure_cover_art_jpeg,
+    add_mp3_metadata,
 )
 
 
@@ -127,14 +129,66 @@ def audio_postprocess_node(state: AgentState) -> AgentState:
             
             shutil.copy2(src_path, dst_path)
             print(f"  ✓ Audio file saved: {dst_path}", flush=True)
+            
+            # MP3/M4B 메타데이터 및 커버 아트 추가
+            try:
+                print(f"  🎨 Adding metadata/cover art...", flush=True)
+                
+                # audio_metadata 추출
+                audio_metadata = state.get("audio_metadata")
+
+                # 커버 아트: 기존 cover_*.jpg 우선, 없으면 생성/변환하여 jpg 확보
+                cover_jpg = ensure_cover_art_jpeg(output_dir, audio_title=audio_title, audio_metadata=audio_metadata, voice_name=voice_name)
+                if cover_jpg and cover_jpg.exists():
+                    print(f"  ✓ Cover art ready: {cover_jpg.name}", flush=True)
+                else:
+                    print(f"  ⚠ Warning: Cover art not available, continuing without cover", flush=True)
+                
+                # MP3 메타데이터 추가
+                metadata_success = add_mp3_metadata(
+                    mp3_path=str(dst_path),
+                    audio_metadata=audio_metadata,
+                    audio_title=audio_title,
+                    voice_name=voice_name,
+                    cover_art_path=str(cover_jpg) if cover_jpg and cover_jpg.exists() else None
+                )
+                
+                if metadata_success:
+                    print(f"  ✓ MP3 metadata and cover art added successfully", flush=True)
+                else:
+                    print(f"  ⚠ Warning: Failed to add MP3 metadata", flush=True)
+                    
+            except Exception as metadata_err:
+                log_error(f"Failed to add metadata/cover art: {metadata_err}", context="audio_postprocess_node", exception=metadata_err)
+                print(f"  ⚠ Warning: Failed to add metadata/cover art: {metadata_err}", flush=True)
+                # 메타데이터 추가 실패해도 계속 진행
 
             # 추가 출력 위치(C:/audiiobook)에도 복사
             try:
                 secondary_dir = ADDITIONAL_OUTPUT_ROOT / Path(folder_name)
                 secondary_dir.mkdir(parents=True, exist_ok=True)
                 secondary_dst = secondary_dir / audio_file_path_obj.name
-                shutil.copy2(src_path, str(secondary_dst))
+                
+                # 메타데이터가 추가된 파일을 복사
+                shutil.copy2(dst_path, str(secondary_dst))
                 print(f"  ✓ Audio file also saved: {secondary_dst}", flush=True)
+                
+                # 커버 아트도 복사
+                if cover_jpg and Path(cover_jpg).exists():
+                    try:
+                        secondary_cover = secondary_dir / cover_jpg.name
+                        shutil.copy2(str(cover_jpg), str(secondary_cover))
+                    except Exception as cover_copy_err:
+                        print(f"  ⚠ Warning: Failed to copy cover art to secondary location: {cover_copy_err}", flush=True)
+
+                # m4b도 복사
+                try:
+                    m4b_path = audio_file_path_obj.with_suffix(".m4b")
+                    if m4b_path.exists():
+                        shutil.copy2(str(m4b_path), str(secondary_dir / m4b_path.name))
+                except Exception as m4b_copy_err:
+                    print(f"  ⚠ Warning: Failed to copy m4b to secondary location: {m4b_copy_err}", flush=True)
+                        
             except Exception as copy_err:
                 print(f"  ⚠ Warning: Failed to copy to additional output: {copy_err}", flush=True)
         else:

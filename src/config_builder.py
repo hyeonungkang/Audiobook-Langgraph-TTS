@@ -96,9 +96,19 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     else:
         config["gemini_model"] = "gemini-2.5-flash-lite"
     
-    # TTS 모델 기본값: flash-tts (멀티스피커 지원)
+    # TTS 모델 기본값: pro-tts (고품질 오디오북/팟캐스트 최적화)
     if "tts_model_name" not in config:
-        config["tts_model_name"] = "gemini-2.5-flash-tts"
+        config["tts_model_name"] = "gemini-2.5-pro-tts"
+
+    # TTS 백엔드 선택
+    # - cloud: google-cloud-texttospeech (기본)
+    # - genai: Gemini API Audio-out preview (cookbook 방식, response_modalities=['Audio'])
+    if "tts_backend" not in config:
+        config["tts_backend"] = "cloud"
+
+    # Audio-out preview 모델 ID (cookbook)
+    if "tts_genai_model_id" not in config:
+        config["tts_genai_model_id"] = "gemini-2.5-flash-preview-tts"
         
     return config
 
