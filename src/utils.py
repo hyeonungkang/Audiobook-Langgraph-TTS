@@ -4282,52 +4282,80 @@ def text_to_speech_from_chunks(
             with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
                 tmp.write(audio_data)
                 tmp_path = tmp.name
+            
+            # 성공 여부 플래그
+            segment_loaded = False
+            
             try:
+                # 1. pydub 시도
                 audio_segment = AudioSegment.from_mp3(tmp_path)
                 audio_segments.append(audio_segment)
-            except Exception as e:
-                log_error(f"Failed to load audio segment {i}: {e}", context="text_to_speech_from_chunks", exception=e)
-                print(f"    ⚠ Warning: Failed to load audio segment {i}: {e}", flush=True)
+                segment_loaded = True
+            except (FileNotFoundError, Exception) as e:
+                # ffmpeg가 없거나 로드 실패 시
+                # FileNotFoundError (WinError 2)는 보통 ffmpeg가 없을 때 발생
+                print(f"    ⚠ Warning: Failed to load audio segment {i} with pydub: {e}", flush=True)
+                print(f"      └─ Fallback: Will use raw binary concatenation", flush=True)
+                # pydub 로드 실패를 감지하기 위해 audio_segments에 추가하지 않거나
+                # 별도의 raw_list를 관리해야 함. 여기서는 아래 병합 로직에서 처리하도록
+                # pydub가 없는 것처럼 동작하게 함
+                pass
             finally:
                 try:
                     os.unlink(tmp_path)
                 except:
                     pass
-        else:
-            # pydub가 없으면 첫 번째 청크만 저장
-            if i == 0:
-                with open(output_filename, 'wb') as f:
-                    f.write(audio_data)
-                print(f"  ✓ Audio saved (pydub not available, first chunk only): {output_filename}", flush=True)
-                return
-    
-    if not audio_segments:
-        print("  ✗ Error: No audio segments to merge", flush=True)
-        raise Exception("No audio segments were created")
-    
-    # 오디오 병합
-    if PYDUB_AVAILABLE:
-        print(f"\n  💾 Merging {len(audio_segments)} audio files...", flush=True)
-        # 300ms 침묵 추가
-        silence = AudioSegment.silent(duration=300)
-        combined = audio_segments[0]
-        for i, seg in enumerate(audio_segments[1:], 1):
-            combined += silence + seg
-            if (i + 1) % 5 == 0:
-                print(f"    Merged {i+1}/{len(audio_segments)} segments...", flush=True)
         
-        # 파일 저장
+        # pydub가 없거나 로드에 실패했으면 원본 바이트라도 저장해야 함 (순서 보장)
+        # 이미 all_results에 raw bytes가 있으므로, 병합 단계에서 이를 확인
+            
+    # 오디오 병합
+    # pydub가 있고 모든 세그먼트가 성공적으로 로드되었는지 확인
+    if PYDUB_AVAILABLE and len(audio_segments) == len(all_results):
+        print(f"\n  💾 Merging {len(audio_segments)} audio files (using pydub)...", flush=True)
         try:
+            # 300ms 침묵 추가
+            silence = AudioSegment.silent(duration=300)
+            combined = audio_segments[0]
+            for i, seg in enumerate(audio_segments[1:], 1):
+                combined += silence + seg
+                if (i + 1) % 5 == 0:
+                    print(f"    Merged {i+1}/{len(audio_segments)} segments...", flush=True)
+            
+            # 파일 저장
             combined.export(output_filename, format="mp3")
             file_size = os.path.getsize(output_filename)
             duration_seconds = len(combined) / 1000.0
             print(f"\n  ✨ Output Saved: {output_filename}", flush=True)
         except Exception as e:
-            log_error(f"Failed to export audio file: {e}", context="text_to_speech_from_chunks", exception=e)
-            print(f"  ✗ Error: Failed to export audio file: {e}", flush=True)
-            raise
+            log_error(f"Failed to export audio file with pydub: {e}", context="text_to_speech_from_chunks", exception=e)
+            print(f"  ✗ Error: Failed to export audio file with pydub: {e}", flush=True)
+            print("  ⚠ Trying fallback raw concatenation...", flush=True)
+            # 실패 시 Fallback으로 이동
+            _merge_raw_audio(all_results, output_filename)
     else:
-        print("  ⚠ Warning: pydub not available, cannot merge audio segments", flush=True)
+        # pydub가 없거나 로드 실패 시 Raw Concatenation
+        reason = "pydub not installed" if not PYDUB_AVAILABLE else "ffmpeg missing or load failed"
+        print(f"  ⚠ Warning: {reason}, merging using raw binary concatenation", flush=True)
+        _merge_raw_audio(all_results, output_filename)
+
+
+def _merge_raw_audio(all_results: dict[int, bytes], output_filename: str) -> None:
+    """Raw MP3 바이트를 단순 연결하여 저장 (Fallback)"""
+    try:
+        print(f"\n  💾 Merging {len(all_results)} audio segments (raw binary mode)...", flush=True)
+        with open(output_filename, 'wb') as f:
+            for i in sorted(all_results.keys()):
+                f.write(all_results[i])
+        
+        if os.path.exists(output_filename):
+            print(f"\n  ✨ Output Saved (Raw Merge): {output_filename}", flush=True)
+        else:
+            raise Exception("File write failed")
+    except Exception as e:
+        log_error(f"Failed to merge raw audio: {e}", context="_merge_raw_audio", exception=e)
+        print(f"  ✗ Error: Failed to merge raw audio: {e}", flush=True)
+        raise
 
 
 def text_to_speech_radio_show(
@@ -4424,33 +4452,53 @@ def text_to_speech_radio_show(
         raise Exception("Radio show TTS failed: no successful dialogues")
     
     # 병합
+    # 병합
     if PYDUB_AVAILABLE:
         print(f"\n  💾 Merging {len(all_results)} dialogue audios...", flush=True)
-        silence = AudioSegment.silent(duration=300)
+        
+        # pydub로 시도
         combined = None
-        for i in sorted(all_results.keys()):
-            audio_data = all_results[i]
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
-                tmp.write(audio_data)
-                tmp_path = tmp.name
-            try:
-                segment = AudioSegment.from_mp3(tmp_path)
-                combined = segment if combined is None else combined + silence + segment
-            finally:
+        success_pydub = False
+        
+        try:
+            silence = AudioSegment.silent(duration=300)
+            segments = []
+            
+            for i in sorted(all_results.keys()):
+                audio_data = all_results[i]
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                    tmp.write(audio_data)
+                    tmp_path = tmp.name
+                
                 try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-        if combined is None:
-            raise Exception("No audio segments to merge for radio show")
-        combined.export(output_filename, format="mp3")
-        print(f"  ✨ Radio show output saved: {output_filename}", flush=True)
+                    segment = AudioSegment.from_mp3(tmp_path)
+                    segments.append(segment)
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+            
+            if len(segments) == len(all_results):
+                combined = segments[0]
+                for seg in segments[1:]:
+                    combined += silence + seg
+                
+                combined.export(output_filename, format="mp3")
+                print(f"  ✨ Radio show output saved: {output_filename}", flush=True)
+                success_pydub = True
+            
+        except Exception as e:
+            print(f"  ⚠ Pydub merge failed (likely ffmpeg missing): {e}", flush=True)
+            print("  ⚠ Falling back to raw binary concatenation...", flush=True)
+        
+        if not success_pydub:
+            _merge_raw_audio(all_results, output_filename)
+        
     else:
-        # pydub 없으면 첫 성공만 저장
-        first_idx = sorted(all_results.keys())[0]
-        with open(output_filename, 'wb') as f:
-            f.write(all_results[first_idx])
-        print(f"  ⚠ Warning: pydub missing, saved only first dialogue to {output_filename}", flush=True)
+        # pydub 없으면 raw merge
+        print(f"  ⚠ Warning: pydub missing, using raw binary concatenation", flush=True)
+        _merge_raw_audio(all_results, output_filename)
     
     elapsed = time.time() - start_time
     print(f"\n  📊 Radio show TTS summary: success {len(all_results)}/{total_requests}, failed {len(all_failed)}, time {elapsed:.1f}s\n", flush=True)
@@ -4632,27 +4680,48 @@ def text_to_speech_radio_show_structured(
     
     if PYDUB_AVAILABLE:
         print(f"\n  💾 Merging {len(audio_segments)} batch audios...", flush=True)
-        silence = AudioSegment.silent(duration=300)
-        combined = None
-        for idx, audio_data in enumerate(audio_segments):
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
-                tmp.write(audio_data)
-                tmp_path = tmp.name
-            try:
-                seg = AudioSegment.from_mp3(tmp_path)
-                combined = seg if combined is None else combined + silence + seg
-            finally:
+        success_pydub = False
+        
+        try:
+            silence = AudioSegment.silent(duration=300)
+            pydub_segments = []
+            
+            for idx, audio_data in enumerate(audio_segments):
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                    tmp.write(audio_data)
+                    tmp_path = tmp.name
                 try:
-                    os.unlink(tmp_path)
-                except:
-                    pass
-        combined.export(output_filename, format="mp3")
-        print(f"  ✓ Structured radio show audio saved: {output_filename}", flush=True)
+                    seg = AudioSegment.from_mp3(tmp_path)
+                    pydub_segments.append(seg)
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+            
+            if len(pydub_segments) == len(audio_segments):
+                combined = pydub_segments[0]
+                for seg in pydub_segments[1:]:
+                    combined += silence + seg
+                
+                combined.export(output_filename, format="mp3")
+                print(f"  ✓ Structured radio show audio saved: {output_filename}", flush=True)
+                success_pydub = True
+                
+        except Exception as e:
+            print(f"  ⚠ Pydub merge failed (likely ffmpeg missing): {e}", flush=True)
+            print("  ⚠ Falling back to raw binary concatenation...", flush=True)
+            
+        if not success_pydub:
+             # 재구성을 위해 all_results 형태(dict)로 변환
+            dummy_dict = {i: data for i, data in enumerate(audio_segments)}
+            _merge_raw_audio(dummy_dict, output_filename)
+        
     else:
-        # pydub 없으면 첫 배치만 저장
-        with open(output_filename, "wb") as f:
-            f.write(audio_segments[0])
-        print(f"  ⚠ Warning: pydub missing, saved only first batch to {output_filename}", flush=True)
+        # pydub 없으면 raw merge
+        print(f"  ⚠ Warning: pydub missing, using raw binary concatenation", flush=True)
+        dummy_dict = {i: data for i, data in enumerate(audio_segments)}
+        _merge_raw_audio(dummy_dict, output_filename)
 
 def sanitize_path_component(text: str) -> str:
     """파일 경로에 사용할 수 없는 문자를 제거합니다."""

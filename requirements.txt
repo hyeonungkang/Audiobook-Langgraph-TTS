@@ -48,3 +48,15 @@ python-multipart>=0.0.6
 # Note: opentelemetry-proto will be installed as a dependency of langgraph
 # It requires protobuf>=5.0,<7.0 which we've specified above
 # This resolves the dependency conflict between opentelemetry-proto and google-generativeai
+
+# Visualization & Plotting
+matplotlib>=3.8.0
+seaborn>=0.13.0
+graphviz>=0.20.1
+pydot>=2.0.0
+# For LangGraph visualization
+grandalf>=0.8.0
+
+# FFmpeg static binary installer (attempts to provide ffmpeg for pydub)
+static-ffmpeg>=2.5.0
+
