@@ -11,7 +11,7 @@
 
 *Gemini API를 사용해 텍스트를 분석하고, 다양한 서사 모드로 오디오북을 생성합니다*
 
-[설치](#-설치-방법) • [사용법](#️-사용-방법-cli) • [API 키 설정](#-api-키-설정) • [문제 해결](#-문제-해결)
+[설치](#-설치-방법) • [사용법](#️-사용-방법) • [API 키 설정](#-api-키-설정) • [문제 해결](#-문제-해결)
 
 </div>
 
@@ -25,69 +25,45 @@
 |---------|--------|
 | 🤖 **AI Agent 기반** | 논문을 15개 세그먼트로 자동 분해 및 기획 |
 | 🎭 **4가지 서사 모드** | 멘토/코치, 이성친구, 친구, 라디오쇼 모드 |
-| � **M4B 오디오북** | 챕터 마커, 메타데이터, 커버 아트 완벽 지원 |
+| 🎨 **Rich CLI 인터페이스** | Typer, Rich, Click 기반의 아름다운 터미널 UI |
 | 🎨 **Generative Art** | 콘텐츠에 어울리는 커버 아트 자동 생성 (Voronoi) |
-| �🌐 **다국어 지원** | 한국어/영어 스크립트 자동 생성 |
-| 👤 **개인화** | 청자 이름 개인화 (기본값: "용사") |
+| 🌐 **다국어 지원** | 한국어/영어 스크립트 자동 생성 |
+| 👤 **개인화** | 청자 이름 개인화 (기본값: "현웅") |
 | ⚡ **병렬 처리** | 15개 세그먼트 동시 생성으로 빠른 처리 |
 | 🎵 **고품질 음성** | Gemini 2.5 Pro TTS (여성 13개, 남성 16개 음성) |
 | 💰 **비용 최적화** | 토큰 소모 60-80% 감소, TTS API 호출 최소화 |
 | 📄 **유연한 입력** | `input.txt`에 아무 텍스트나 넣어도 자동 처리 |
+| 🔧 **모듈화된 아키텍처** | 서비스 클래스 기반의 깔끔한 코드 구조 |
 
 </div>
 
-
 ---
 
-## 📅 2026.01.05 최신 업데이트 (v2.2)
+## 📅 최신 업데이트 (v2.3)
 
-**TTS 청킹 최적화 및 API 소모 최소화 업데이트입니다!**
+**Rich CLI 및 코드 리팩토링 업데이트입니다!**
 
-### 1️⃣ TTS 청킹 최적화 ⚡
-- **전체 텍스트 통합 청킹**: 모든 스크립트를 합쳐서 한 번에 청킹하여 TTS API 호출 횟수를 최소화
-- **API 제한 준수**: Cloud Text-to-Speech API 제한(4000 bytes)에 정확히 맞춰 청킹 로직 개선
-- **효율적인 청크 분할**: 문장 단위로 자연스럽게 분할하여 최적의 청크 크기 유지
+### 1️⃣ Rich 기반 CLI 인터페이스 🎨
+- **Typer, Rich, Click 통합**: 아름답고 직관적인 터미널 UI
+- **대화형 선택 메뉴**: 테이블 형식의 깔끔한 옵션 표시
+- **진행 상황 표시**: 실시간 진행 상황 및 상태 업데이트
+- **에러 메시지 개선**: 명확하고 읽기 쉬운 에러 표시
 
-### 2️⃣ 코드 품질 개선 🔧
-- **중복 코드 제거**: 구버전 TTS 함수 제거 및 REST API 버전 통합
-- **린트 오류 해결**: 모든 코드 린트 오류 수정 완료
+### 2️⃣ 코드 리팩토링 및 모듈화 🔧
+- **서비스 클래스 도입**: `TTSService`, `AudioService`, `TextService` 등으로 기능 분리
+- **코어 모듈 분리**: `RateLimiter`, `ErrorHandler`, `ConfigManager` 등 핵심 기능 모듈화
+- **상수 중앙 관리**: 모든 매직 넘버와 문자열 상수를 `constants.py`에서 중앙 관리
+- **점진적 마이그레이션**: 기존 코드와의 호환성 유지하며 점진적 개선
 
----
+### 3️⃣ TTS Rate Limiting 최적화 ⚡
+- **9개까지 즉시 전송**: 9개 이하 청크는 1분 안에 연속 전송
+- **스마트 대기 로직**: 10번째부터만 rate limit 체크하여 효율성 향상
+- **자동 재시도**: Rate limit 오류 시 자동 재시도 및 백오프
 
-## 📅 2026.01.04 업데이트 (v2.1)
-
-**TTS 성능 최적화 및 오디오 품질 개선 업데이트입니다!**
-
-### 1️⃣ TTS 병렬 처리 최적화 ⚡
-- **전체 청크 동시 전송**: 15개 청크를 슬라이딩 윈도우 없이 모든 요청을 한 번에 병렬 전송하여 처리 속도 대폭 향상
-- **ThreadPoolExecutor 최적화**: API 제한을 고려하여 `max_workers`를 10개로 설정
-- **처리 시간 단축**: Rate limit 대기 없이 모든 요청을 즉시 제출하여 전체 변환 시간 단축
-
-### 2️⃣ 임시 파일 자동 정리 🗑️
-- **자동 정리 기능**: 변환이 성공적으로 완료되면 `temp_output` 디렉토리의 임시 파일들이 자동으로 삭제됩니다
-- **세션별 정리**: 해당 세션의 파일들만 정확하게 식별하여 삭제 (다른 세션 파일 보호)
-- **디스크 공간 절약**: 더 이상 수동으로 temp 파일을 정리할 필요가 없습니다
-
-### 3️⃣ 오디오 품질 향상 🎵
-- **향상된 노이즈 제거**: 더 공격적인 노이즈 제거 설정 (prop_decrease=0.95, stationary=True)
-
----
-
-## 📅 2026.01.04 대규모 업데이트 (v2.0)
-
-**오디오북 품질과 안정성을 획기적으로 개선한 메이저 업데이트입니다!**
-
-### 1️⃣ 메타데이터터
-- **풍부한 메타데이터**: 제목, 아티스트, 앨범명, 장르, 연도 등 ID3 태그가 완벽하게 내장됩니다.
-- **FFmpeg 엔진 도입**: 기존의 불안정한 라이브러리를 제거하고, 산업 표준인 **FFmpeg**를 도입하여 인코딩 속도와 안정성을 대폭 강화했습니다.
-
-### 2️⃣ Generative Art 커버 자동 생성 🎨
-- **"이미지가 없어도 괜찮습니다"**: 커버 이미지를 따로 준비하지 않아도, 수학적 알고리즘(Voronoi Diagram)이 **매번 세상에 하나뿐인 기하학적 커버 아트**를 생성합니다.
-- **세련된 디자인**: 전문가가 큐레이션한 컬러 팔레트를 무작위로 조합하여, 소장하고 싶은 앨범 아트를 만들어줍니다.
-
-### 3️⃣ 라디오쇼 모드 엔진 리팩토링 📻
-- **멀티 스피커 아키텍처**: `Radio Show` 모드의 핵심 로직을 완전히 재설계했습니다. 이제 **Host 1**과 **Host 2**가 프롬프트 누수 없이 완벽하게 분리된 목소리로 대화를 나눕니다.
-- **스마트 쿼터 관리**: Google Cloud TTS의 API 제한(RPM)을 자동으로 감지하고 조절하는 **Rate Limiter**와 **재시도(Retry)** 로직을 탑재하여, 대량 변환 중에도 멈추지 않습니다.
+### 4️⃣ 오류 처리 개선 🛡️
+- **견고한 오류 처리**: 모든 주요 작업에 try-except 적용
+- **상세한 로깅**: 오류 발생 시 traceback 출력으로 디버깅 용이
+- **안전한 폴백**: 오류 발생 시에도 기본값으로 계속 진행
 
 ---
 
@@ -144,7 +120,7 @@
 
 ```bash
 git clone <repository-url>
-cd langraph_tts
+cd Audiobook-Langgraph-TTS
 ```
 
 ### 2️⃣ 가상환경 생성 및 활성화
@@ -202,15 +178,16 @@ pip install -r requirements.txt
 ```bash
 python -c "import langgraph; print('✅ LangGraph OK')"
 python -c "import google.generativeai; print('✅ Google GenerativeAI OK')"
+python -c "import rich; print('✅ Rich OK')"
 ```
 
 ---
 
-## 🖥️ 사용 방법 (CLI)
+## 🖥️ 사용 방법
 
 ### 1️⃣ API 키 설정
 
-#### 방법 1: .env 파일 사용 (권장, 표준 방식) ⭐
+#### 방법 1: .env 파일 사용 (권장) ⭐
 
 프로젝트 루트 디렉토리에 `.env` 파일을 생성하고 다음 내용을 입력하세요:
 
@@ -312,18 +289,19 @@ python main.py
 
 ### 4️⃣ 설정 단계
 
-프로그램 실행 후 다음 단계를 진행합니다:
+프로그램 실행 후 Rich 기반의 아름다운 인터페이스에서 다음 단계를 진행합니다:
 
 #### 1️⃣ Gemini 모델 선택
-- **Pro**: 고품질 생성 (권장, Showrunner에 사용)
-- **Flash**: 빠른 생성 (Writer에 사용)
+- **Gemini 2.5 Flash Lite**: 기본 모델 (빠르고 효율적)
+- **Gemini 2.5 Pro**: 고품질 생성 (더 정확하고 상세한 출력)
+- **Gemini 2.5 Flash**: 빠른 생성 (빠른 응답, 상대적으로 간결한 출력)
 
 #### 2️⃣ 콘텐츠 카테고리 선택
-- 논문/기술 문서 (research_paper)
-- 커리어 (career)
-- 어학 (language_learning)
-- 철학 (philosophy)
-- 뉴스 (tech_news)
+- 📄 논문/기술 문서 (research_paper)
+- 💼 커리어/자기계발 (career)
+- 🗣️ 어학 학습 (language_learning)
+- 🤔 인문학/에세이 (philosophy)
+- 📰 기술 뉴스/트렌드 (tech_news)
 
 #### 3️⃣ 언어 선택
 - 한국어 (ko)
@@ -374,7 +352,7 @@ python main.py
 - Achird (기본값), Algenib, Algieba, Alnilam, Charon, Enceladus, Fenrir, Iapetus, Orus, Puck, Pulcherrima, Rasalgethi, Sadachbia, Sadaltager, Schedar, Umbriel, Zubenelgenubi
 
 #### 6️⃣ 청취자 이름 입력
-- 기본값: **용사**
+- 기본값: **현웅**
 - Enter 키를 누르면 기본값 사용
 - 한국어 대본에서는 자동으로 적절한 조사(은/는, 이/가)가 붙습니다
 
@@ -425,9 +403,11 @@ graph TD
 ### 3단계: TTS (Text-to-Speech) 🎵
 - Gemini 2.5 Pro TTS로 음성 합성
 - 선택한 음성으로 자연스러운 오디오 생성
+- 9개까지는 1분 안에 연속 전송, 10번째부터 rate limit 적용
 
 ### 4단계: 오디오 후처리 🎚️
 - 오디오 파일을 최종 위치로 저장
+- 메타데이터 및 커버 아트 추가
 - `outputs/` 및 `C:/audiiobook/`에 저장
 
 ---
@@ -484,24 +464,54 @@ pip install -r requirements.txt --force-reinstall
 
 </details>
 
+<details>
+<summary><b>TTS Rate Limit 오류</b></summary>
+
+- 프로그램이 자동으로 rate limit을 감지하고 대기합니다
+- 9개 이하는 즉시 전송되며, 10번째부터는 자동으로 대기합니다
+- 오류 발생 시 자동 재시도됩니다
+
+</details>
+
 ---
 
 ## 📁 프로젝트 구조
 
 ```
-langraph_tts/
+Audiobook-Langgraph-TTS/
 ├── main.py                 # 진입점 (가상환경 자동 감지)
 ├── src/
 │   ├── main.py            # 메인 로직
-│   ├── cli.py              # CLI 인터페이스
+│   ├── cli.py              # CLI 인터페이스 (하위 호환성)
+│   ├── cli/                # Rich 기반 CLI 모듈
+│   │   ├── interactive.py  # 대화형 선택 함수들
+│   │   └── main.py         # Typer CLI 앱
 │   ├── config.py           # 설정 관리 (.env 파일 지원)
 │   ├── graph.py            # LangGraph 워크플로우
+│   ├── state.py            # AgentState 정의
+│   ├── core/               # 핵심 모듈
+│   │   ├── constants.py    # 상수 정의
+│   │   ├── rate_limiter.py # Rate Limiter 클래스
+│   │   ├── error_handler.py # Error Handler 클래스
+│   │   └── config_manager.py # Config Manager 클래스
+│   ├── models/             # 데이터 모델
+│   │   ├── voice.py        # VOICE_BANKS
+│   │   ├── narrative.py    # NARRATIVE_MODES
+│   │   └── content.py      # CONTENT_CATEGORIES
+│   ├── services/           # 서비스 클래스
+│   │   ├── tts_service.py  # TTS 서비스
+│   │   ├── audio_service.py # 오디오 서비스
+│   │   └── text_service.py # 텍스트 서비스
+│   ├── utils/              # 유틸리티 모듈
+│   │   ├── logging.py      # 로깅 함수
+│   │   └── timing.py       # 타이밍 함수
+│   ├── utils.py            # 유틸리티 함수 (하위 호환성)
 │   ├── nodes/              # Agent 노드들
 │   │   ├── showrunner.py   # Showrunner Agent
 │   │   ├── writer.py       # Writer Agent
 │   │   ├── tts.py          # TTS 생성
 │   │   └── audio_postprocess.py  # 오디오 후처리
-│   └── utils.py            # 유틸리티 함수
+│   └── server.py           # FastAPI 서버 (선택사항)
 ├── input.txt               # 입력 텍스트 파일
 ├── requirements.txt        # Python 패키지 목록
 ├── .gitignore             # Git 무시 파일
@@ -527,7 +537,7 @@ GOOGLE_APPLICATION_CREDENTIALS=C:/path/to/service-account-key.json
 - `.env.example`은 Git에 포함되지만, 실제 API 키가 들어간 `.env` 파일은 `.gitignore`에 의해 제외됩니다
 
 **📍 위치:**
-- 프로젝트 루트 디렉토리: `langraph_tts/.env`
+- 프로젝트 루트 디렉토리: `Audiobook-Langgraph-TTS/.env`
 
 ### config.json (백업용, 하위 호환성)
 
@@ -546,10 +556,13 @@ GOOGLE_APPLICATION_CREDENTIALS=C:/path/to/service-account-key.json
 | 카테고리 | 기술 |
 |---------|------|
 | **언어** | Python 3.9+ |
-| **AI 프레임워크** | LangGraph |
+| **AI 프레임워크** | LangGraph 1.0+ |
 | **LLM** | Google Gemini 2.5 Pro/Flash |
 | **TTS** | Google Cloud Text-to-Speech |
+| **CLI 프레임워크** | Typer, Rich, Click |
 | **환경 관리** | python-dotenv |
+| **오디오 처리** | pydub, mutagen |
+| **웹 서버** | FastAPI (선택사항) |
 
 </div>
 
@@ -562,7 +575,7 @@ GOOGLE_APPLICATION_CREDENTIALS=C:/path/to/service-account-key.json
 ```
 MIT License
 
-Copyright (c) 2024 LangGraph TTS Contributors
+Copyright (c) 2024-2026 LangGraph TTS Contributors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
