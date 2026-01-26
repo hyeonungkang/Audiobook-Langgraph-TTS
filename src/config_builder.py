@@ -3,7 +3,12 @@ Configuration Builder
 프론트엔드에서 받은 단순 설정값을 CLI와 동일한 형태의 풍부한 설정 객체로 변환합니다.
 """
 from typing import Dict, Any, Optional
-from .utils import CONTENT_CATEGORIES, NARRATIVE_MODES, VOICE_BANKS, DEFAULT_NARRATIVE_MODE
+
+# 순환 import를 피하기 위해 lazy import
+def _get_models():
+    """models를 lazy import"""
+    from .models import CONTENT_CATEGORIES, NARRATIVE_MODES, VOICE_BANKS, DEFAULT_NARRATIVE_MODE
+    return CONTENT_CATEGORIES, NARRATIVE_MODES, VOICE_BANKS, DEFAULT_NARRATIVE_MODE
 
 def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -34,7 +39,8 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     
     language = config.get("language", "ko")
     
-    # 3. 카테고리 검증
+    # 3. 카테고리 검증 (lazy import)
+    CONTENT_CATEGORIES, NARRATIVE_MODES, VOICE_BANKS, DEFAULT_NARRATIVE_MODE = _get_models()
     category = config.get("category", "research_paper")
     if category not in CONTENT_CATEGORIES:
         category = "research_paper"
@@ -67,8 +73,8 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
         if not host2_name:
             host2_name = VOICE_BANKS["male"]["default"]
             
-        host1_profile = _find_voice_profile(host1_name, 1)
-        host2_profile = _find_voice_profile(host2_name, 2)
+        host1_profile = _find_voice_profile(host1_name, 1, VOICE_BANKS)
+        host2_profile = _find_voice_profile(host2_name, 2, VOICE_BANKS)
         
         voice_profile = {
             "host1": host1_profile,
@@ -82,8 +88,8 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
             # 기본값: 여성 음성
             voice_name = VOICE_BANKS["female"]["default"]
             
-        voice_profile = _find_voice_profile(voice_name)
-        
+        voice_profile = _find_voice_profile(voice_name, None, VOICE_BANKS)
+    
     config["voice_profile"] = voice_profile
     
     # 6. 모델 이름 매핑 (gemini_model / tts_model_name)
@@ -113,12 +119,16 @@ def build_config(raw_config: Dict[str, Any]) -> Dict[str, Any]:
     return config
 
 
-def _find_voice_profile(voice_name: str, host_number: Optional[int] = None) -> Dict[str, Any]:
+def _find_voice_profile(voice_name: str, host_number: Optional[int] = None, voice_banks: Optional[Dict] = None) -> Dict[str, Any]:
     """
     음성 이름으로 전체 프로필 정보를 찾습니다.
     """
+    if voice_banks is None:
+        _, _, VOICE_BANKS, _ = _get_models()
+        voice_banks = VOICE_BANKS
+    
     # 모든 음성 뱅크 검색
-    for group_key, bank in VOICE_BANKS.items():
+    for group_key, bank in voice_banks.items():
         for voice in bank["voices"]:
             if voice["name"] == voice_name:
                 profile = {
@@ -132,7 +142,7 @@ def _find_voice_profile(voice_name: str, host_number: Optional[int] = None) -> D
                 return profile
                 
     # 찾지 못한 경우 기본값 반환 (여성 기본)
-    default_voice = VOICE_BANKS["female"]["voices"][0]
+    default_voice = voice_banks["female"]["voices"][0]
     profile = {
         "name": default_voice["name"],
         "display": default_voice.get("display", default_voice["name"]),

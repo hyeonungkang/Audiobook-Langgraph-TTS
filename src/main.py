@@ -35,18 +35,70 @@ except Exception as e:
     raise
 _log_import("src/main.py:30", "Before importing .utils", {}, "D")
 try:
+    # utils/__init__.py에서 logging/timing 함수들 import
     from .utils import (
-        get_mode_profile,
-        get_listener_names,
-        prompt_listener_name,
-        PYDUB_AVAILABLE,
         log_error,
         print_error,
         print_warning,
         save_workflow_timing_log,
         get_workflow_timing_summary,
-        set_gemini_model,
     )
+    # utils.py를 직접 import하여 NARRATIVE_MODES 등 로드
+    # utils.py는 상대 import를 사용하므로, 여기서는 절대 import로 접근
+    import sys
+    import importlib.util
+    from pathlib import Path
+    
+    # utils.py를 모듈로 로드
+    utils_py_path = Path(__file__).parent / "utils.py"
+    if utils_py_path.exists():
+        # 이미 로드된 모듈들을 sys.modules에 등록
+        if "src" not in sys.modules:
+            import types
+            sys.modules["src"] = types.ModuleType("src")
+        if "src.config" not in sys.modules:
+            from . import config
+            sys.modules["src.config"] = config
+        if "src.core" not in sys.modules:
+            from . import core
+            sys.modules["src.core"] = core
+        if "src.models" not in sys.modules:
+            from . import models
+            sys.modules["src.models"] = models
+        if "src.utils" not in sys.modules:
+            import types
+            sys.modules["src.utils"] = types.ModuleType("src.utils")
+        if "src.utils.logging" not in sys.modules:
+            from .utils import logging
+            sys.modules["src.utils.logging"] = logging
+        if "src.utils.timing" not in sys.modules:
+            from .utils import timing
+            sys.modules["src.utils.timing"] = timing
+        
+        spec = importlib.util.spec_from_file_location("src.utils_module", utils_py_path)
+        utils_module = importlib.util.module_from_spec(spec)
+        sys.modules["src.utils_module"] = utils_module
+        spec.loader.exec_module(utils_module)
+        
+        # 함수들 추출
+        get_mode_profile = utils_module.get_mode_profile
+        get_listener_names = utils_module.get_listener_names
+        prompt_listener_name = utils_module.prompt_listener_name
+        PYDUB_AVAILABLE = utils_module.PYDUB_AVAILABLE
+        set_gemini_model = utils_module.set_gemini_model
+        
+        # NARRATIVE_MODES를 models/narrative.py에 설정
+        from .models import narrative as narrative_module
+        # 프록시 객체를 실제 딕셔너리로 교체
+        if hasattr(narrative_module, '_NARRATIVE_MODES_CACHE'):
+            narrative_module._NARRATIVE_MODES_CACHE = utils_module.NARRATIVE_MODES
+        # 프록시 객체의 _modes 속성도 업데이트
+        if hasattr(narrative_module, 'NARRATIVE_MODES') and hasattr(narrative_module.NARRATIVE_MODES, '_modes'):
+            narrative_module.NARRATIVE_MODES._modes = utils_module.NARRATIVE_MODES
+        # 직접 할당도 시도
+        narrative_module.NARRATIVE_MODES = utils_module.NARRATIVE_MODES
+    else:
+        raise ImportError(f"Cannot find utils.py at {utils_py_path}")
     _log_import("src/main.py:42", ".utils import succeeded", {}, "D")
 except Exception as e:
     _log_import("src/main.py:44", ".utils import failed", {"error": str(e), "type": type(e).__name__}, "D")
@@ -114,80 +166,177 @@ def main():
     latest_output_dir = load_latest_run_path()
     _log("src/main.py:43", "latest_output_dir loaded", {"latest_output_dir": str(latest_output_dir) if latest_output_dir else None}, "B")
     
-    print("="*70, flush=True)
-    print("TTS Audiobook Converter Starting", flush=True)
-    print("="*70, flush=True)
-    if latest_output_dir:
-        print(f"  ℹ︎ Last run output folder: {latest_output_dir}", flush=True)
+    # Rich Console 초기화
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.table import Table
+        from rich import box
+        console = Console()
+    except ImportError:
+        console = None
+        Panel = None
+        Table = None
+        box = None
     
-    print("\n" + "="*70, flush=True)
-    print("📋 설정 단계 안내", flush=True)
-    print("="*70, flush=True)
-    print("다음 순서로 설정을 진행합니다:", flush=True)
-    print("  1️⃣  Gemini 모델 선택 (Pro/Flash)", flush=True)
-    print("  2️⃣  콘텐츠 카테고리 선택 (논문/커리어/어학/철학/뉴스)", flush=True)
-    print("  3️⃣  언어 선택 (한국어/영어)", flush=True)
-    print("  4️⃣  서사 모드 선택 (이성친구/친구/라디오쇼)", flush=True)
-    print("  5️⃣  음성 선택 (모드에 따라 1개 또는 2개)", flush=True)
-    print("  6️⃣  청취자 이름 입력", flush=True)
-    print("="*70, flush=True)
+    # 시작 메시지 (Rich Panel 사용)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]🎙️ TTS Audiobook Converter[/bold cyan]",
+            border_style="cyan"
+        ))
+        if latest_output_dir:
+            console.print(f"[blue]ℹ︎[/blue] Last run output folder: [cyan]{latest_output_dir}[/cyan]")
+        console.print()
+        
+        # 설정 단계 안내 (Rich Table 사용)
+        setup_table = Table(title="📋 설정 단계 안내", box=box.ROUNDED, show_header=False, header_style="bold magenta")
+        setup_table.add_column("단계", style="cyan", width=8)
+        setup_table.add_column("설명", style="yellow", width=60)
+        
+        setup_table.add_row("1️⃣", "Gemini 모델 선택 (Pro/Flash)")
+        setup_table.add_row("2️⃣", "콘텐츠 카테고리 선택 (논문/커리어/어학/철학/뉴스)")
+        setup_table.add_row("3️⃣", "언어 선택 (한국어/영어)")
+        setup_table.add_row("4️⃣", "서사 모드 선택 (이성친구/친구/라디오쇼)")
+        setup_table.add_row("5️⃣", "음성 선택 (모드에 따라 1개 또는 2개)")
+        setup_table.add_row("6️⃣", "청취자 이름 입력")
+        
+        console.print(setup_table)
+        console.print()
+    else:
+        # Rich가 없는 경우 fallback
+        print("="*70, flush=True)
+        print("TTS Audiobook Converter Starting", flush=True)
+        print("="*70, flush=True)
+        if latest_output_dir:
+            print(f"  ℹ︎ Last run output folder: {latest_output_dir}", flush=True)
+        
+        print("\n" + "="*70, flush=True)
+        print("📋 설정 단계 안내", flush=True)
+        print("="*70, flush=True)
+        print("다음 순서로 설정을 진행합니다:", flush=True)
+        print("  1️⃣  Gemini 모델 선택 (Pro/Flash)", flush=True)
+        print("  2️⃣  콘텐츠 카테고리 선택 (논문/커리어/어학/철학/뉴스)", flush=True)
+        print("  3️⃣  언어 선택 (한국어/영어)", flush=True)
+        print("  4️⃣  서사 모드 선택 (이성친구/친구/라디오쇼)", flush=True)
+        print("  5️⃣  음성 선택 (모드에 따라 1개 또는 2개)", flush=True)
+        print("  6️⃣  청취자 이름 입력", flush=True)
+        print("="*70, flush=True)
     
     # 1단계: Gemini 모델 선택
     _log("src/main.py:64", "Before select_gemini_model()", {}, "B")
-    print("\n" + "="*70, flush=True)
-    print("1️⃣  Gemini 모델 선택", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print(Panel.fit(
+            "[bold cyan]1️⃣  Gemini 모델 선택[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("1️⃣  Gemini 모델 선택", flush=True)
+        print("="*70, flush=True)
     selected_model = select_gemini_model()
     _log("src/main.py:68", "After select_gemini_model()", {"selected_model": selected_model}, "B")
     set_gemini_model(selected_model)  # 전역 변수에 설정
     
     # 2단계: 콘텐츠 카테고리 선택
-    print("\n" + "="*70, flush=True)
-    print("2️⃣  콘텐츠 카테고리 선택", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]2️⃣  콘텐츠 카테고리 선택[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("2️⃣  콘텐츠 카테고리 선택", flush=True)
+        print("="*70, flush=True)
     selected_category = select_content_category()
     
     # 3단계: 언어 선택
-    print("\n" + "="*70, flush=True)
-    print("3️⃣  언어 선택", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]3️⃣  언어 선택[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("3️⃣  언어 선택", flush=True)
+        print("="*70, flush=True)
     selected_language = select_language()
     
     # 4단계: 서사 모드 선택
-    print("\n" + "="*70, flush=True)
-    print("4️⃣  서사 모드 선택", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]4️⃣  서사 모드 선택[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("4️⃣  서사 모드 선택", flush=True)
+        print("="*70, flush=True)
     selected_mode = select_narrative_mode(category=selected_category)
     mode_profile = get_mode_profile(selected_mode)
-    print(f"  ✓ Narrative style: {mode_profile['label']} ({mode_profile['description']})", flush=True)
+    if console:
+        console.print(f"[green]✓[/green] Narrative style: [bold]{mode_profile['label']}[/bold] ([yellow]{mode_profile['description']}[/yellow])")
+    else:
+        print(f"  ✓ Narrative style: {mode_profile['label']} ({mode_profile['description']})", flush=True)
     
     # 5단계: 음성 선택 (라디오쇼 모드는 두 개의 음성 필요)
-    print("\n" + "="*70, flush=True)
-    print("5️⃣  음성 선택", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]5️⃣  음성 선택[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("5️⃣  음성 선택", flush=True)
+        print("="*70, flush=True)
     if selected_mode == "radio_show":
-        print("  ℹ︎ 라디오쇼 모드: 첫 번째 화자와 두 번째 화자의 음성을 각각 선택합니다.", flush=True)
-        print("  ℹ︎ 성별 제한 없이 자유롭게 선택할 수 있습니다 (예: 여자-여자, 남자-남자, 남자-여자 등).", flush=True)
+        if console:
+            console.print("[blue]ℹ︎[/blue] 라디오쇼 모드: 첫 번째 화자와 두 번째 화자의 음성을 각각 선택합니다.")
+            console.print("[blue]ℹ︎[/blue] 성별 제한 없이 자유롭게 선택할 수 있습니다 (예: 여자-여자, 남자-남자, 남자-여자 등).")
+        else:
+            print("  ℹ︎ 라디오쇼 모드: 첫 번째 화자와 두 번째 화자의 음성을 각각 선택합니다.", flush=True)
+            print("  ℹ︎ 성별 제한 없이 자유롭게 선택할 수 있습니다 (예: 여자-여자, 남자-남자, 남자-여자 등).", flush=True)
         host1_voice, host2_voice = select_radio_show_hosts(language=selected_language)
         selected_voice = {
             "host1": host1_voice,
             "host2": host2_voice,
             "mode": "radio_show"
         }
-        print(f"\n  ✓ Radio show voices: First Host = {host1_voice['display']}, Second Host = {host2_voice['display']}", flush=True)
+        if console:
+            console.print(f"\n[green]✓[/green] Radio show voices: First Host = [bold]{host1_voice['display']}[/bold], Second Host = [bold]{host2_voice['display']}[/bold]")
+        else:
+            print(f"\n  ✓ Radio show voices: First Host = {host1_voice['display']}, Second Host = {host2_voice['display']}", flush=True)
     else:
-        print("  ℹ︎ 단일 화자 모드: 하나의 음성을 선택합니다.", flush=True)
+        if console:
+            console.print("[blue]ℹ︎[/blue] 단일 화자 모드: 하나의 음성을 선택합니다.")
+        else:
+            print("  ℹ︎ 단일 화자 모드: 하나의 음성을 선택합니다.", flush=True)
         selected_voice = select_voice(language=selected_language)
     
     # 6단계: 청취자 이름 입력
-    print("\n" + "="*70, flush=True)
-    print("6️⃣  청취자 이름 입력", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        console.print(Panel.fit(
+            "[bold cyan]6️⃣  청취자 이름 입력[/bold cyan]",
+            border_style="cyan"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print("6️⃣  청취자 이름 입력", flush=True)
+        print("="*70, flush=True)
     listener_name = prompt_listener_name(default_name="현웅")
     listener_names = get_listener_names(listener_name)
     listener_suffix = listener_names["suffix"]
     listener_base = listener_names["base"]
-    print(f"  ✓ 한국어 대본에서는 '{listener_suffix}'를, 영어 대본에서는 '{listener_base}'를 사용할게요.", flush=True)
+    if console:
+        console.print(f"[green]✓[/green] 한국어 대본에서는 '[bold cyan]{listener_suffix}[/bold cyan]'를, 영어 대본에서는 '[bold cyan]{listener_base}[/bold cyan]'를 사용할게요.")
+    else:
+        print(f"  ✓ 한국어 대본에서는 '{listener_suffix}'를, 영어 대본에서는 '{listener_base}'를 사용할게요.", flush=True)
     
     # Normal flow: Read input.txt and process with Showrunner/Writer
     # Read input.txt
@@ -333,25 +482,54 @@ def main():
     # 워크플로우 타이밍 요약 표시
     timing_summary = get_workflow_timing_summary()
     if timing_summary:
-        print("\n" + "="*70, flush=True)
-        print("📊 Workflow Timing Summary", flush=True)
-        print("="*70, flush=True)
-        for step_name, info in timing_summary.items():
-            duration = info["duration_seconds"]
-            print(f"  • {step_name:20s}: {duration:6.1f}s ({duration/60:.2f} min)", flush=True)
-        print("="*70, flush=True)
+        if console:
+            console.print()
+            timing_table = Table(title="📊 Workflow Timing Summary", box=box.ROUNDED, show_header=True, header_style="bold magenta")
+            timing_table.add_column("단계", style="cyan", width=25)
+            timing_table.add_column("소요 시간", justify="right", style="green", width=15)
+            timing_table.add_column("분", justify="right", style="yellow", width=10)
+            
+            for step_name, info in timing_summary.items():
+                duration = info["duration_seconds"]
+                timing_table.add_row(step_name, f"{duration:6.1f}s", f"{duration/60:.2f} min")
+            
+            console.print(timing_table)
+        else:
+            print("\n" + "="*70, flush=True)
+            print("📊 Workflow Timing Summary", flush=True)
+            print("="*70, flush=True)
+            for step_name, info in timing_summary.items():
+                duration = info["duration_seconds"]
+                print(f"  • {step_name:20s}: {duration:6.1f}s ({duration/60:.2f} min)", flush=True)
+            print("="*70, flush=True)
     
     # Print total execution time and results
     total_time = time.time() - start_time
-    print("\n" + "="*70, flush=True)
-    print(f"✓ All tasks completed!", flush=True)
-    print(f"  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)", flush=True)
-    if final_audio_path:
-        print(f"  Output file: {final_audio_path}", flush=True)
-        output_dir = Path(final_audio_path).parent
-    if output_dir:
-        print(f"  Output folder: {output_dir}", flush=True)
-    print("="*70, flush=True)
+    if console:
+        console.print()
+        result_panel_content = f"[bold green]✓ All tasks completed![/bold green]\n\n"
+        result_panel_content += f"Total time: [cyan]{total_time:.1f} seconds[/cyan] ([yellow]{total_time/60:.1f} minutes[/yellow])\n"
+        if final_audio_path:
+            result_panel_content += f"\nOutput file: [cyan]{final_audio_path}[/cyan]"
+            output_dir = Path(final_audio_path).parent
+        if output_dir:
+            result_panel_content += f"\nOutput folder: [cyan]{output_dir}[/cyan]"
+        
+        console.print(Panel.fit(
+            result_panel_content,
+            title="🎉 완료",
+            border_style="green"
+        ))
+    else:
+        print("\n" + "="*70, flush=True)
+        print(f"✓ All tasks completed!", flush=True)
+        print(f"  Total time: {total_time:.1f} seconds ({total_time/60:.1f} minutes)", flush=True)
+        if final_audio_path:
+            print(f"  Output file: {final_audio_path}", flush=True)
+            output_dir = Path(final_audio_path).parent
+        if output_dir:
+            print(f"  Output folder: {output_dir}", flush=True)
+        print("="*70, flush=True)
 
 
 if __name__ == "__main__":

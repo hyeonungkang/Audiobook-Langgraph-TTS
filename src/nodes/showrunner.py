@@ -5,17 +5,39 @@ import json
 from pathlib import Path
 from datetime import datetime
 from ..state import AgentState
+# utils.py와 utils/__init__.py를 구분하여 import
+# utils/__init__.py에서 logging/timing 함수들 import
 from ..utils import (
-    enforce_segment_count,
-    get_gemini_model,
-    generate_content_with_retry,
-    extract_key_sections,
-    build_showrunner_prompt,
     log_error,
-    validate_segments_quality,
     log_workflow_step_start,
     log_workflow_step_end
 )
+# utils.py의 함수들은 직접 import (utils.py는 래퍼 역할)
+# Python은 utils/__init__.py를 우선하므로, utils.py를 직접 import하기 위해
+# importlib을 사용하거나 sys.modules를 조작해야 함
+import importlib.util
+import sys
+from pathlib import Path
+
+# utils.py를 직접 import하기 위한 트릭
+# sys.modules에 이미 'src.utils'가 utils/__init__.py로 등록되어 있을 수 있음
+# 따라서 utils.py를 다른 이름으로 import
+utils_py_path = Path(__file__).parent.parent / "utils.py"
+if utils_py_path.exists():
+    # utils.py를 utils_module로 import
+    spec = importlib.util.spec_from_file_location("src.utils_module", utils_py_path)
+    utils_module = importlib.util.module_from_spec(spec)
+    sys.modules["src.utils_module"] = utils_module
+    spec.loader.exec_module(utils_module)
+    
+    enforce_segment_count = utils_module.enforce_segment_count
+    get_gemini_model = utils_module.get_gemini_model
+    generate_content_with_retry = utils_module.generate_content_with_retry
+    extract_key_sections = utils_module.extract_key_sections
+    build_showrunner_prompt = utils_module.build_showrunner_prompt
+    validate_segments_quality = utils_module.validate_segments_quality
+else:
+    raise ImportError(f"Cannot find utils.py at {utils_py_path}")
 
 
 def showrunner_node(state: AgentState) -> AgentState:

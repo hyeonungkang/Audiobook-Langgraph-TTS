@@ -6,16 +6,55 @@ import time
 from pathlib import Path
 from ..config import OUTPUT_ROOT, ADDITIONAL_OUTPUT_ROOT
 from ..state import AgentState
+# utils.py와 utils/__init__.py를 구분하여 import
 from ..utils import (
-    prepare_output_directory,
-    build_output_paths,
-    save_latest_run_path,
     log_error,
     log_workflow_step_start,
     log_workflow_step_end,
-    ensure_cover_art_jpeg,
-    add_mp3_metadata,
 )
+# utils.py의 함수들은 직접 import
+import importlib.util
+import sys
+from pathlib import Path
+
+utils_py_path = Path(__file__).parent.parent / "utils.py"
+if utils_py_path.exists():
+    # 이미 로드된 모듈들을 sys.modules에 등록
+    if "src" not in sys.modules:
+        import types
+        sys.modules["src"] = types.ModuleType("src")
+    if "src.config" not in sys.modules:
+        from .. import config
+        sys.modules["src.config"] = config
+    if "src.core" not in sys.modules:
+        from .. import core
+        sys.modules["src.core"] = core
+    if "src.models" not in sys.modules:
+        from .. import models
+        sys.modules["src.models"] = models
+    if "src.utils" not in sys.modules:
+        import types
+        sys.modules["src.utils"] = types.ModuleType("src.utils")
+    if "src.utils.logging" not in sys.modules:
+        from ..utils import logging
+        sys.modules["src.utils.logging"] = logging
+    if "src.utils.timing" not in sys.modules:
+        from ..utils import timing
+        sys.modules["src.utils.timing"] = timing
+    
+    spec = importlib.util.spec_from_file_location("src.utils_module", utils_py_path)
+    utils_module = importlib.util.module_from_spec(spec)
+    sys.modules["src.utils_module"] = utils_module
+    spec.loader.exec_module(utils_module)
+    
+    prepare_output_directory = utils_module.prepare_output_directory
+    build_output_paths = utils_module.build_output_paths
+    save_latest_run_path = utils_module.save_latest_run_path
+    ensure_cover_art_jpeg = utils_module.ensure_cover_art_jpeg
+    get_mode_profile = utils_module.get_mode_profile
+    add_mp3_metadata = utils_module.add_mp3_metadata
+else:
+    raise ImportError(f"Cannot find utils.py at {utils_py_path}")
 
 
 def audio_postprocess_node(state: AgentState) -> AgentState:
@@ -52,9 +91,13 @@ def audio_postprocess_node(state: AgentState) -> AgentState:
             voice_name = voice_profile.get("name", "Achernar") if voice_profile else "Achernar"
         
         # 모드 레이블 추출 (영어 키 사용)
-        from ..utils import get_mode_profile
-        mode_profile = get_mode_profile(narrative_mode)
-        mode_label = mode_profile.get("label", "").replace("/", "_").replace(" ", "_")
+        try:
+            mode_profile = get_mode_profile(narrative_mode)
+            mode_label = mode_profile.get("label", "").replace("/", "_").replace(" ", "_")
+        except Exception as mode_err:
+            # get_mode_profile 실패 시 기본값 사용
+            print(f"  ⚠ Warning: Failed to get mode profile: {mode_err}, using default", flush=True)
+            mode_label = narrative_mode.replace("/", "_").replace(" ", "_")
         
         language_code = "ko-KR" if language == "ko" else "en-US"
         
@@ -96,39 +139,50 @@ def audio_postprocess_node(state: AgentState) -> AgentState:
                 pass
         
         if final_audio_path_obj.exists():
-            # 대상 디렉토리가 없으면 생성
-            audio_file_path_obj.parent.mkdir(parents=True, exist_ok=True)
-            
-            # 절대 경로로 변환하여 복사
-            src_path = str(final_audio_path_obj.resolve())
-            dst_path = str(audio_file_path_obj.resolve())
-            
-            # 디버그 로그 (개발용)
-            if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
-                try:
-                    DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-                    with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
-                        import json
-                        log_entry = {
-                            "sessionId": "debug-session",
-                            "runId": "run1",
-                            "hypothesisId": "B",
-                            "location": "audio_postprocess.py:audio_postprocess_node",
-                            "message": "audio_postprocess copy file paths",
-                            "data": {
-                                "src_path": src_path,
-                                "dst_path": dst_path,
-                                "src_exists": Path(src_path).exists(),
-                                "dst_parent_exists": Path(dst_path).parent.exists()
-                            },
-                            "timestamp": int(time.time() * 1000)
-                        }
-                        f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
-                except: 
-                    pass
-            
-            shutil.copy2(src_path, dst_path)
-            print(f"  ✓ Audio file saved: {dst_path}", flush=True)
+            try:
+                # 대상 디렉토리가 없으면 생성
+                audio_file_path_obj.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 절대 경로로 변환하여 복사
+                src_path = str(final_audio_path_obj.resolve())
+                dst_path = str(audio_file_path_obj.resolve())
+                
+                # 디버그 로그 (개발용)
+                if DEBUG_LOG_ENABLED and DEBUG_LOG_PATH:
+                    try:
+                        DEBUG_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+                        with open(DEBUG_LOG_PATH, 'a', encoding='utf-8') as f:
+                            import json
+                            log_entry = {
+                                "sessionId": "debug-session",
+                                "runId": "run1",
+                                "hypothesisId": "B",
+                                "location": "audio_postprocess.py:audio_postprocess_node",
+                                "message": "audio_postprocess copy file paths",
+                                "data": {
+                                    "src_path": src_path,
+                                    "dst_path": dst_path,
+                                    "src_exists": Path(src_path).exists(),
+                                    "dst_parent_exists": Path(dst_path).parent.exists()
+                                },
+                                "timestamp": int(time.time() * 1000)
+                            }
+                            f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+                    except: 
+                        pass
+                
+                shutil.copy2(src_path, dst_path)
+                print(f"  ✓ Audio file saved: {dst_path}", flush=True)
+                
+                # State 업데이트 (복사 성공 후)
+                state["final_audio_path"] = str(paths["audio_file"])
+                state["output_dir"] = str(output_dir)
+            except Exception as copy_err:
+                log_error(f"Failed to copy audio file: {copy_err}", context="audio_postprocess_node", exception=copy_err)
+                print(f"  ✗ Error: Failed to copy audio file: {copy_err}", flush=True)
+                # 복사 실패해도 원본 파일 경로는 유지
+                state["final_audio_path"] = str(final_audio_path)
+                state["output_dir"] = str(final_audio_path_obj.parent)
             
             # MP3/M4B 메타데이터 및 커버 아트 추가
             try:
@@ -228,11 +282,16 @@ def audio_postprocess_node(state: AgentState) -> AgentState:
                 f.write(original_text)
         
         # 최근 실행 경로 저장
-        save_latest_run_path(output_dir)
+        try:
+            save_latest_run_path(output_dir)
+        except Exception as save_err:
+            print(f"  ⚠ Warning: Failed to save latest run path: {save_err}", flush=True)
         
-        # State 업데이트
-        state["final_audio_path"] = str(paths["audio_file"])
-        state["output_dir"] = str(output_dir)
+        # State 업데이트 (이미 복사 성공 시 업데이트됨, 여기서는 최종 확인)
+        if "final_audio_path" not in state or not state.get("final_audio_path"):
+            # 복사 실패한 경우 원본 경로 유지
+            state["final_audio_path"] = str(final_audio_path) if final_audio_path else ""
+            state["output_dir"] = str(final_audio_path_obj.parent) if final_audio_path_obj.exists() else str(output_dir)
         
         # 워크플로우 타이밍 완료
         duration = log_workflow_step_end("audio_postprocess", start_time)
@@ -241,13 +300,18 @@ def audio_postprocess_node(state: AgentState) -> AgentState:
         return state
         
     except Exception as e:
+        import traceback
         error_info = {
             "node_name": "audio_postprocess",
             "error_message": str(e),
             "segment_id": None
         }
+        if "errors" not in state:
+            state["errors"] = []
         state["errors"].append(error_info)
         log_error(f"Audio postprocess node error: {e}", context="audio_postprocess_node", exception=e)
         print(f"Audio postprocess node error: {e}", flush=True)
+        print(f"  Traceback: {traceback.format_exc()}", flush=True)
+        # 오류가 발생해도 state는 반환 (다른 노드가 계속 실행될 수 있도록)
         return state
 

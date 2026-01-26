@@ -28,108 +28,50 @@ try:
 except ImportError:
     PYDUB_AVAILABLE = False
 
-# Gemini-TTS 관련 런타임 튜닝용 전역 설정
-# - QUOTA_TTS_RPM: 콘솔에서 확인한 gemini-2.5-*-tts 분당 요청 한도 (안전 마진 9개로 설정)
-#   실제 쿼터는 더 높을 수 있지만, 요청당 여유 시간을 고려하여 9로 운용
-# - ASSUMED_TTS_LATENCY_SEC: 1청크 평균 소요 시간(사용자 관찰값 기반, 초기값 15초)
-# - CURRENT_MAX_TTS_CONCURRENCY: 런타임에서 피드백으로 조정되는 동시 요청 수 (더 이상 사용 안 함)
-QUOTA_TTS_RPM: float = 9.0  # 분당 9개로 운용
-ASSUMED_TTS_LATENCY_SEC: float = 15.0
-CURRENT_MAX_TTS_CONCURRENCY: int = 2
-
-# Rate limiting을 위한 전역 변수
-_tts_request_times: deque = deque()  # 최근 1분간 요청 시간 기록
-_tts_request_lock: Lock = Lock()
-
 # Import application_path from config
 from .config import application_path, OUTPUT_ROOT, LATEST_RUN_MARKER
 
-# 음성 및 서사 모드 메타데이터
-VOICE_BANKS = {
-    "female": {
-        "label": "여성 음성",
-        "description": "sweet & warm한 여성 음성",
-        "default": "Achernar",
-        "voices": [
-            {"name": "Achernar", "display": "Achernar", "gender": "FEMALE"},
-            {"name": "Aoede", "display": "Aoede", "gender": "FEMALE"},
-            {"name": "Autonoe", "display": "Autonoe", "gender": "FEMALE"},
-            {"name": "Callirrhoe", "display": "Callirrhoe", "gender": "FEMALE"},
-            {"name": "Despina", "display": "Despina", "gender": "FEMALE"},
-            {"name": "Erinome", "display": "Erinome", "gender": "FEMALE"},
-            {"name": "Gacrux", "display": "Gacrux", "gender": "FEMALE"},
-            {"name": "Kore", "display": "Kore", "gender": "FEMALE"},
-            {"name": "Laomedeia", "display": "Laomedeia", "gender": "FEMALE"},
-            {"name": "Leda", "display": "Leda", "gender": "FEMALE"},
-            {"name": "Sulafat", "display": "Sulafat", "gender": "FEMALE"},
-            {"name": "Vindemiatrix", "display": "Vindemiatrix", "gender": "FEMALE"},
-            {"name": "Zephyr", "display": "Zephyr", "gender": "FEMALE"},
-        ],
-    },
-    "male": {
-        "label": "남성 음성",
-        "description": "친한 친구 모드에 어울리는 남성 톤",
-        "default": "Achird",
-        "voices": [
-            {"name": "Achird", "display": "Achird", "gender": "MALE"},
-            {"name": "Algenib", "display": "Algenib", "gender": "MALE"},
-            {"name": "Algieba", "display": "Algieba", "gender": "MALE"},
-            {"name": "Alnilam", "display": "Alnilam", "gender": "MALE"},
-            {"name": "Charon", "display": "Charon", "gender": "MALE"},
-            {"name": "Enceladus", "display": "Enceladus", "gender": "MALE"},
-            {"name": "Fenrir", "display": "Fenrir", "gender": "MALE"},
-            {"name": "Iapetus", "display": "Iapetus", "gender": "MALE"},
-            {"name": "Orus", "display": "Orus", "gender": "MALE"},
-            {"name": "Pulcherrima", "display": "Pulcherrima", "gender": "MALE"},
-            {"name": "Puck", "display": "Puck", "gender": "MALE"},
-            {"name": "Rasalgethi", "display": "Rasalgethi", "gender": "MALE"},
-            {"name": "Sadachbia", "display": "Sadachbia", "gender": "MALE"},
-            {"name": "Sadaltager", "display": "Sadaltager", "gender": "MALE"},
-            {"name": "Schedar", "display": "Schedar", "gender": "MALE"},
-            {"name": "Umbriel", "display": "Umbriel", "gender": "MALE"},
-            {"name": "Zubenelgenubi", "display": "Zubenelgenubi", "gender": "MALE"},
-        ],
-    },
-}
+# 새로운 모듈 구조에서 import (하위 호환성을 위해)
+from .core.constants import (
+    TTS_QUOTA_RPM,
+    TTS_ASSUMED_LATENCY_SEC,
+    TTS_MAX_CONCURRENCY,
+    TTS_MAX_BYTES,
+    TTS_SAFETY_MARGIN,
+    TTS_SAMPLE_RATE,
+    TTS_BATCH_SIZE,
+    DEFAULT_NARRATIVE_MODE,
+)
+from .core.rate_limiter import RateLimiter, get_default_rate_limiter
+from .utils.logging import log_error, print_error, print_warning
+from .utils.timing import (
+    log_workflow_step_start,
+    log_workflow_step_end,
+    save_workflow_timing_log,
+    get_workflow_timing_summary,
+)
+from .models.voice import VOICE_BANKS
+from .models.content import CONTENT_CATEGORIES
+# NARRATIVE_MODES는 아래에 정의되어 있으므로, models/narrative.py에 설정
+from .models import narrative as narrative_module
+# 순환 import를 피하기 위해 models/narrative.py는 직접 import하지 않음
 
-DEFAULT_NARRATIVE_MODE = "mentor"
+# 하위 호환성을 위한 별칭
+QUOTA_TTS_RPM = TTS_QUOTA_RPM
+ASSUMED_TTS_LATENCY_SEC = TTS_ASSUMED_LATENCY_SEC
+CURRENT_MAX_TTS_CONCURRENCY = TTS_MAX_CONCURRENCY
 
-# 콘텐츠 카테고리 정의
-CONTENT_CATEGORIES = {
-    "research_paper": {
-        "label": "논문/기술 문서 (Research Paper)",
-        "description": "학술 논문, 기술 보고서, 연구 자료",
-        "icon": "📄",
-        "recommended_modes": ["mentor"],  # 멘토 모드 추천
-    },
-    "career": {
-        "label": "커리어/자기계발 (Career & Self-Growth)",
-        "description": "커리어 조언, 자기계발, 동기부여 콘텐츠",
-        "icon": "💼",
-        "recommended_modes": ["mentor", "friend"],  # 멘토, 친구 모드 추천
-    },
-    "language_learning": {
-        "label": "어학 학습 (Language Learning)",
-        "description": "영어 회화 팁, 표현 익히기, 쉐도잉",
-        "icon": "🗣️",
-        "recommended_modes": ["mentor", "friend"],  # 멘토, 친구 모드 추천
-    },
-    "philosophy": {
-        "label": "인문학/에세이 (Philosophy & Essay)",
-        "description": "인생 철학, 수필, 사색적인 글",
-        "icon": "🤔",
-        "recommended_modes": ["mentor", "friend", "lover"],  # 다양한 모드 추천
-    },
-    "tech_news": {
-        "label": "기술 뉴스/트렌드 (Tech & Trends)",
-        "description": "뉴스, 트렌드 리포트, 기술 동향",
-        "icon": "📰",
-        "recommended_modes": ["radio_show", "mentor"],  # 라디오쇼, 멘토 모드 추천
-    },
-}
+# Rate limiting을 위한 전역 변수 (하위 호환성 유지)
+# 새로운 코드는 RateLimiter 클래스를 사용해야 함
+_tts_request_times: deque = deque()  # 최근 1분간 요청 시간 기록
+_tts_request_lock: Lock = Lock()
 
-# NARRATIVE_MODES는 매우 길므로 별도 파일로 분리하거나 여기에 포함
-# 여기서는 핵심만 포함하고 나머지는 노드에서 main.py를 import하여 사용
+# 음성 및 서사 모드 메타데이터는 models에서 import됨 (하위 호환성을 위해 re-export)
+# VOICE_BANKS, CONTENT_CATEGORIES, NARRATIVE_MODES는 위에서 이미 import됨
+
+# 중복 정의 제거: VOICE_BANKS, CONTENT_CATEGORIES, DEFAULT_NARRATIVE_MODE는 models에서 import됨
+# NARRATIVE_MODES는 아래에 정의되어 있으며, models/narrative.py에서 이를 import하여 사용
+# TODO: NARRATIVE_MODES도 models/narrative.py로 완전히 이동 필요 (순환 참조 해결 후)
 NARRATIVE_MODES = {
     "mentor": {
         "label": "멘토/코치 모드",
@@ -1002,187 +944,9 @@ Avoid overusing tags. Natural radio show conversation format is most important."
     },
 }
 
-def log_error(message: str, context: str = "general", exception: Exception = None) -> None:
-    """Append error messages to a log file with timestamps for troubleshooting."""
-    try:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_path = application_path / "error_log.txt"
-        with open(log_path, "a", encoding="utf-8") as f:
-            error_msg = f"[{timestamp}] ({context}) {message}"
-            if exception:
-                error_msg += f"\n  Exception type: {type(exception).__name__}"
-                error_msg += f"\n  Exception details: {str(exception)}"
-                import traceback
-                tb_str = ''.join(traceback.format_exception(type(exception), exception, exception.__traceback__))
-                error_msg += f"\n  Traceback:\n{tb_str}"
-            error_msg += "\n"
-            f.write(error_msg)
-    except Exception:
-        pass
-
-
-def print_error(message: str, context: str = "general", exception: Exception = None) -> None:
-    """
-    Print error message to console and log it to file.
-    
-    Args:
-        message: Error message to display
-        context: Context where the error occurred
-        exception: Optional exception object
-    """
-    error_prefix = f"✗ [{context}] {message}"
-    print(error_prefix, flush=True)
-    
-    if exception:
-        print(f"  Exception type: {type(exception).__name__}", flush=True)
-        print(f"  Exception details: {str(exception)}", flush=True)
-    
-    # Also log to file
-    log_error(message, context, exception)
-
-
-def print_warning(message: str, context: str = "general", exception: Exception = None) -> None:
-    """
-    Print warning message to console and optionally log it.
-    
-    Args:
-        message: Warning message to display
-        context: Context where the warning occurred
-        exception: Optional exception object
-    """
-    warning_prefix = f"⚠ [{context}] {message}"
-    print(warning_prefix, flush=True)
-    
-    if exception:
-        print(f"  Exception type: {type(exception).__name__}", flush=True)
-        print(f"  Exception details: {str(exception)}", flush=True)
-
-
-# 워크플로우 타이밍 로깅을 위한 전역 변수
-_workflow_timing_data: dict = {}
-_workflow_timing_lock = threading.Lock()
-
-
-def log_workflow_step_start(step_name: str) -> float:
-    """
-    워크플로우 스텝 시작 시간을 기록합니다.
-    
-    Args:
-        step_name: 스텝 이름 (예: "showrunner", "writer_map", "tts_generator", "audio_postprocess")
-    
-    Returns:
-        시작 시간 (timestamp)
-    """
-    start_time = time.time()
-    with _workflow_timing_lock:
-        if step_name not in _workflow_timing_data:
-            _workflow_timing_data[step_name] = []
-        _workflow_timing_data[step_name].append({
-            "start_time": start_time,
-            "start_time_str": datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
-            "end_time": None,
-            "end_time_str": None,
-            "duration_seconds": None
-        })
-    return start_time
-
-
-def log_workflow_step_end(step_name: str, start_time: float = None) -> float:
-    """
-    워크플로우 스텝 완료 시간을 기록합니다.
-    
-    Args:
-        step_name: 스텝 이름
-        start_time: 시작 시간 (None이면 가장 최근 시작 시간 사용)
-    
-    Returns:
-        소요 시간 (초)
-    """
-    end_time = time.time()
-    with _workflow_timing_lock:
-        if step_name not in _workflow_timing_data:
-            return 0.0
-        
-        # 가장 최근에 시작된 항목 찾기
-        entries = _workflow_timing_data[step_name]
-        if not entries:
-            return 0.0
-        
-        # end_time이 None인 가장 최근 항목 찾기
-        for entry in reversed(entries):
-            if entry["end_time"] is None:
-                if start_time is None or abs(entry["start_time"] - start_time) < 0.1:
-                    entry["end_time"] = end_time
-                    entry["end_time_str"] = datetime.fromtimestamp(end_time).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                    entry["duration_seconds"] = end_time - entry["start_time"]
-                    return entry["duration_seconds"]
-    
-    return 0.0
-
-
-def save_workflow_timing_log() -> Path:
-    """
-    워크플로우 타이밍 데이터를 JSON 파일로 저장합니다.
-    
-    Returns:
-        저장된 파일 경로
-    """
-    try:
-        logs_dir = application_path / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = logs_dir / f"workflow_timing_{timestamp}.json"
-        
-        with _workflow_timing_lock:
-            # 통계 계산
-            stats = {}
-            for step_name, entries in _workflow_timing_data.items():
-                completed = [e for e in entries if e["duration_seconds"] is not None]
-                if completed:
-                    durations = [e["duration_seconds"] for e in completed]
-                    stats[step_name] = {
-                        "count": len(completed),
-                        "total_seconds": sum(durations),
-                        "avg_seconds": sum(durations) / len(durations),
-                        "min_seconds": min(durations),
-                        "max_seconds": max(durations)
-                    }
-            
-            output_data = {
-                "timestamp": datetime.now().isoformat(),
-                "steps": _workflow_timing_data.copy(),
-                "statistics": stats
-            }
-            
-            with open(log_file, "w", encoding="utf-8") as f:
-                json.dump(output_data, f, ensure_ascii=False, indent=2)
-        
-        return log_file
-    except Exception as e:
-        log_error(f"Failed to save workflow timing log: {e}", context="save_workflow_timing_log", exception=e)
-        return None
-
-
-def get_workflow_timing_summary() -> dict:
-    """
-    현재 워크플로우 타이밍 요약 정보를 반환합니다.
-    
-    Returns:
-        타이밍 요약 딕셔너리
-    """
-    with _workflow_timing_lock:
-        summary = {}
-        for step_name, entries in _workflow_timing_data.items():
-            completed = [e for e in entries if e["duration_seconds"] is not None]
-            if completed:
-                latest = completed[-1]
-                summary[step_name] = {
-                    "duration_seconds": latest["duration_seconds"],
-                    "start_time_str": latest["start_time_str"],
-                    "end_time_str": latest["end_time_str"]
-                }
-        return summary
+# 로깅 및 타이밍 함수들은 utils/logging.py와 utils/timing.py로 이동됨
+# 하위 호환성을 위해 위에서 이미 import하여 re-export
+# log_error, print_error, print_warning, log_workflow_step_start 등은 위에서 이미 import됨
 
 def safe_delete_file(file_path, max_retries=3, retry_delay=0.5):
     """파일을 안전하게 삭제 (재시도 포함)"""
@@ -1698,64 +1462,17 @@ def get_recommended_markup_tags(narrative_mode: str, category: str, language: st
     return "\n".join(lines)
 
 
+# validate_segments_quality는 services/text_service.py로 이동됨
+# 하위 호환성을 위해 래퍼 함수 제공
 def validate_segments_quality(segments: list[dict], language: str = "ko", min_core_length: int = 10) -> tuple[bool, list[str]]:
     """
-    세그먼트 품질을 검증합니다.
-
-    Args:
-        segments: 세그먼트 리스트
-        language: 언어 코드 ("ko" 또는 "en")
-        min_core_length: core_content 최소 길이
-
-    Returns:
-        (is_valid, error_messages)
+    세그먼트 품질을 검증합니다. (하위 호환성 래퍼)
+    
+    실제 구현은 TextService.validate_segments_quality를 사용합니다.
     """
-    errors: list[str] = []
-
-    if not segments:
-        return False, ["segments가 비어 있습니다"]
-
-    placeholder_phrases = [
-        "내용을 채워주세요",
-        "내용을 채워 주세요",
-        "please fill in content",
-        "fill in content",
-    ]
-
-    # 필수 필드 및 플레이스홀더 검증
-    for idx, seg in enumerate(segments):
-        seg_id = seg.get("segment_id", idx + 1)
-        required_fields = ["title", "core_content", "instruction_for_writer", "opening_line", "closing_line"]
-
-        for field in required_fields:
-            value = (seg.get(field) or "").strip()
-            if not value:
-                errors.append(f"segment {seg_id}: {field} is empty")
-
-        core_content = (seg.get("core_content") or "").strip()
-        if core_content and len(core_content) < min_core_length:
-            errors.append(f"segment {seg_id}: core_content too short (<{min_core_length})")
-
-        lower_values = [
-            (seg.get("title") or "").lower(),
-            core_content.lower(),
-            (seg.get("opening_line") or "").lower(),
-            (seg.get("closing_line") or "").lower(),
-            (seg.get("instruction_for_writer") or "").lower(),
-        ]
-        for phrase in placeholder_phrases:
-            if any(phrase in v for v in lower_values):
-                errors.append(f"segment {seg_id}: contains placeholder '{phrase}'")
-                break
-
-    # 세그먼트 간 opening/closing 중복 검증
-    for i in range(len(segments) - 1):
-        closing = (segments[i].get("closing_line") or "").strip()
-        opening_next = (segments[i + 1].get("opening_line") or "").strip()
-        if closing and opening_next and closing == opening_next:
-            errors.append(f"segment {segments[i].get('segment_id', i + 1)} -> {segments[i + 1].get('segment_id', i + 2)}: closing_line duplicates next opening_line")
-
-    return len(errors) == 0, errors
+    from .services.text_service import TextService
+    text_service = TextService()
+    return text_service.validate_segments_quality(segments, language, min_core_length)
 
 
 def build_showrunner_prompt(text: str, config: dict, previous_errors: list[str] | None = None) -> str:
@@ -2842,132 +2559,27 @@ def enforce_segment_count(segments: list[dict], target: int = 15) -> list[dict]:
     return segments
 
 
+# remove_ssml_tags와 chunk_text_for_tts는 services/tts_service.py로 이동됨
+# 하위 호환성을 위해 re-export
+from .services.tts_service import TTSService
+
+_tts_service = TTSService()
+
 def remove_ssml_tags(text: str) -> str:
     """
-    SSML 태그를 제거하되, Gemini-TTS markup tag는 보존합니다.
+    SSML 태그를 제거하되, Gemini-TTS markup tag는 보존합니다. (하위 호환성 래퍼)
     
-    Gemini-TTS markup tag 형식: [tag_name] (예: [sigh], [short pause], [whispering])
-    SSML 태그 형식: <tag>content</tag> (예: <speak>...</speak>)
+    실제 구현은 TTSService.remove_ssml_tags를 사용합니다.
     """
-    if not text:
-        return ""
-    
-    # SSML 태그만 제거 (꺾쇠괄호로 둘러싸인 태그)
-    # Gemini-TTS markup tag는 대괄호로 둘러싸여 있으므로 보존됨
-    text = re.sub(r'<[^>]+>', '', text)
-    return text.strip()
-
+    return _tts_service.remove_ssml_tags(text)
 
 def chunk_text_for_tts(text: str, language: str = "ko", max_chunk_length: int = None) -> list[str]:
     """
-    TTS용 텍스트를 청크로 분할합니다.
+    TTS용 텍스트를 청크로 분할합니다. (하위 호환성 래퍼)
     
-    Gemini-TTS 제한: input.text가 4000 bytes를 초과하면 안 됩니다.
+    실제 구현은 TTSService.chunk_text_for_tts를 사용합니다.
     """
-    if not text:
-        return []
-    
-    # SSML 태그 제거
-    text = remove_ssml_tags(text)
-    
-    # text의 최대 길이 = 4000 bytes (안전 마진 200 bytes)
-    # max_chunk_length가 지정되지 않았으면 자동 계산
-    if max_chunk_length is None:
-        max_chunk_length = 4000 - 200  # 안전 마진
-        if max_chunk_length < 500:  # 최소 500 bytes는 보장
-            max_chunk_length = 500
-    else:
-        # 지정된 max_chunk_length도 4000 bytes 제한 내에서 조정
-        max_chunk_length = min(max_chunk_length, 4000 - 200)
-        if max_chunk_length < 500:
-            max_chunk_length = 500
-    
-    # 문장 단위로 분할 (구분자 보존)
-    if language == "ko":
-        sentence_endings = r'[.!?。！？]'
-    else:
-        sentence_endings = r'[.!?]'
-    
-    # 구분자를 포함한 문장 추출 (re.finditer 사용)
-    sentences_with_endings = []
-    pattern = re.compile(f'(.+?)({sentence_endings})(\\s*)', re.DOTALL)
-    
-    last_end = 0
-    for match in pattern.finditer(text):
-        sentence_text = match.group(1).strip()
-        ending = match.group(2)  # 구분자 (. ! ? 등)
-        trailing_space = match.group(3)  # 구분자 뒤 공백
-        
-        if sentence_text:
-            # 구분자와 함께 문장 저장
-            full_sentence = sentence_text + ending + trailing_space
-            sentences_with_endings.append(full_sentence)
-        last_end = match.end()
-    
-    # 마지막 부분 처리 (구분자가 없는 나머지 텍스트)
-    if last_end < len(text):
-        remaining = text[last_end:].strip()
-        if remaining:
-            sentences_with_endings.append(remaining)
-    
-    # 구분자가 없는 문장이 있으면 원본 텍스트를 그대로 사용
-    if not sentences_with_endings:
-        sentences_with_endings = [text]
-    
-    chunks = []
-    current_chunk = ""
-    
-    for sentence in sentences_with_endings:
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-            
-        # 현재 청크에 문장 추가 시도
-        # 문장들은 이미 구분자와 공백을 포함하고 있으므로 자연스럽게 연결
-        if current_chunk:
-            # current_chunk 끝이 공백이 아니면 공백 하나 추가
-            if not current_chunk.rstrip().endswith(('.', '!', '?', '。', '！', '？')):
-                # 구분자로 끝나지 않으면 공백 추가
-                test_chunk = current_chunk.rstrip() + " " + sentence
-            else:
-                # 구분자로 끝나면 이미 공백이 포함되어 있을 수 있으므로 확인
-                if current_chunk.endswith(" "):
-                    test_chunk = current_chunk + sentence
-                else:
-                    test_chunk = current_chunk + " " + sentence
-        else:
-            test_chunk = sentence
-        
-        test_chunk_bytes = len(test_chunk.encode('utf-8'))
-        if test_chunk_bytes <= max_chunk_length:
-            current_chunk = test_chunk
-        else:
-            # 현재 청크를 저장
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            
-            # 문장 자체가 max_chunk_length를 초과하면 강제로 자름
-            sentence_bytes = len(sentence.encode('utf-8'))
-            if sentence_bytes > max_chunk_length:
-                # 문장을 단어 단위로 자름
-                words = sentence.split()
-                temp_chunk = ""
-                for word in words:
-                    test_word_chunk = temp_chunk + " " + word if temp_chunk else word
-                    if len(test_word_chunk.encode('utf-8')) <= max_chunk_length:
-                        temp_chunk = test_word_chunk
-                    else:
-                        if temp_chunk:
-                            chunks.append(temp_chunk.strip())
-                        temp_chunk = word
-                current_chunk = temp_chunk
-            else:
-                current_chunk = sentence
-    
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-    
-    return chunks if chunks else [text]
+    return _tts_service.chunk_text_for_tts(text, language, max_chunk_length)
 
 
 def parse_radio_show_dialogue(text: str) -> list[dict]:
@@ -3832,10 +3444,11 @@ def _wait_for_rate_limit():
         
         # 분당 쿼터 제한 확인
         current_count = len(_tts_request_times)
+        # 9개까지는 1분 안에 다 보낼 수 있도록 허용 (9개 초과 시에만 대기)
         if current_count >= int(QUOTA_TTS_RPM):
             # 가장 오래된 요청이 1분 전이 될 때까지 대기
             oldest_time = _tts_request_times[0]
-            wait_time = oldest_time + 60 - now + 0.5  # 0.5초 안전 마진 증가
+            wait_time = oldest_time + 60 - now + 0.5  # 0.5초 안전 마진
             if wait_time > 0:
                 time.sleep(wait_time)
                 # 다시 정리
@@ -4085,16 +3698,26 @@ def text_to_speech_from_chunks(
         future_to_idx = {}
         
         # 모든 요청을 제출
-        # Rate Limit을 엄격하게 준수하기 위해 모든 요청 전에 체크
+        # 9개까지는 1분 안에 다 보낼 수 있도록 허용 (9개 초과 시에만 대기)
         for i, chunk in enumerate(text_chunks):
             # 입력 바이트 수 미리 계산
             text_bytes = len(chunk.encode('utf-8'))
             input_bytes = text_bytes
             total_input_bytes += input_bytes
             
-            # 모든 요청 전에 Rate Limit 체크 (첫 요청도 포함)
+            # 9개까지는 대기 없이 연속 전송, 10번째부터만 rate limit 체크
             # _wait_for_rate_limit() 내부에서 이미 요청 시간을 기록하므로 중복 기록하지 않음
-            _wait_for_rate_limit()
+            if i >= int(QUOTA_TTS_RPM):
+                _wait_for_rate_limit()
+            else:
+                # 9개 이하는 대기 없이 바로 기록만 (요청 시간 기록)
+                with _tts_request_lock:
+                    now = time.time()
+                    # 1분 이전의 기록 제거
+                    while _tts_request_times and _tts_request_times[0] < now - 60:
+                        _tts_request_times.popleft()
+                    # 현재 요청 시간 기록
+                    _tts_request_times.append(now)
             
             request_submit_times[i] = time.time()
             
@@ -4414,8 +4037,18 @@ def text_to_speech_radio_show(
             print(f"  ⚠ Warning: Dialogue {idx+1} speaker profile missing, skipping", flush=True)
             continue
         
-        # Rate limit 체크
-        _wait_for_rate_limit()
+        # 9개까지는 1분 안에 다 보낼 수 있도록 허용 (9개 초과 시에만 대기)
+        if idx >= int(QUOTA_TTS_RPM):
+            _wait_for_rate_limit()
+        else:
+            # 9개 이하는 대기 없이 바로 기록만 (요청 시간 기록)
+            with _tts_request_lock:
+                now = time.time()
+                # 1분 이전의 기록 제거
+                while _tts_request_times and _tts_request_times[0] < now - 60:
+                    _tts_request_times.popleft()
+                # 현재 요청 시간 기록
+                _tts_request_times.append(now)
         request_submit_times[idx] = time.time()
         
         current_time_str = datetime.now().strftime("%H:%M:%S")
@@ -4624,8 +4257,18 @@ def text_to_speech_radio_show_structured(
     failure_indices: list[int] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for i, batch_text in enumerate(batches):
-            # Rate limit 체크
-            _wait_for_rate_limit()
+            # 9개까지는 1분 안에 다 보낼 수 있도록 허용 (9개 초과 시에만 대기)
+            if i >= int(QUOTA_TTS_RPM):
+                _wait_for_rate_limit()
+            else:
+                # 9개 이하는 대기 없이 바로 기록만 (요청 시간 기록)
+                with _tts_request_lock:
+                    now = time.time()
+                    # 1분 이전의 기록 제거
+                    while _tts_request_times and _tts_request_times[0] < now - 60:
+                        _tts_request_times.popleft()
+                    # 현재 요청 시간 기록
+                    _tts_request_times.append(now)
             request_submit_times[i] = time.time()
             
             # text가 4000 bytes를 초과하면 안 됨

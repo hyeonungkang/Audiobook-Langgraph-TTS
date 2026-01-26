@@ -9,7 +9,7 @@ from typing import Dict, Optional, Any
 from pathlib import Path
 from .graph import compile_graph
 from .state import AgentState
-from .utils import log_error
+from .utils.logging import log_error
 
 
 class JobStatus:

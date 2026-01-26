@@ -4,20 +4,35 @@ TTS Generator node for LangGraph TTS Audiobook Converter
 from pathlib import Path
 from datetime import datetime
 from ..state import AgentState
+# utils.py와 utils/__init__.py를 구분하여 import
 from ..utils import (
-    text_to_speech_from_chunks,
-    text_to_speech_radio_show,
-    text_to_speech_radio_show_structured,
-    chunk_text_for_tts,
-    parse_radio_show_dialogue,
-    merge_dialogue_chunks,
-    remove_ssml_tags,
-    get_mode_profile,
-    sanitize_path_component,
     log_error,
     log_workflow_step_start,
     log_workflow_step_end
 )
+# utils.py의 함수들은 직접 import
+import importlib.util
+import sys
+from pathlib import Path
+
+utils_py_path = Path(__file__).parent.parent / "utils.py"
+if utils_py_path.exists():
+    spec = importlib.util.spec_from_file_location("src.utils_module", utils_py_path)
+    utils_module = importlib.util.module_from_spec(spec)
+    sys.modules["src.utils_module"] = utils_module
+    spec.loader.exec_module(utils_module)
+    
+    text_to_speech_from_chunks = utils_module.text_to_speech_from_chunks
+    text_to_speech_radio_show = utils_module.text_to_speech_radio_show
+    text_to_speech_radio_show_structured = utils_module.text_to_speech_radio_show_structured
+    chunk_text_for_tts = utils_module.chunk_text_for_tts
+    parse_radio_show_dialogue = utils_module.parse_radio_show_dialogue
+    merge_dialogue_chunks = utils_module.merge_dialogue_chunks
+    remove_ssml_tags = utils_module.remove_ssml_tags
+    get_mode_profile = utils_module.get_mode_profile
+    sanitize_path_component = utils_module.sanitize_path_component
+else:
+    raise ImportError(f"Cannot find utils.py at {utils_py_path}")
 
 
 def tts_generator_node(state: AgentState) -> AgentState:

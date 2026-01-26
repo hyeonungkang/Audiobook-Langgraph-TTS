@@ -6,16 +6,34 @@ from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..state import AgentState
+# utils.py와 utils/__init__.py를 구분하여 import
+# utils/__init__.py에서 logging/timing 함수들 import
 from ..utils import (
-    get_gemini_model,
-    generate_content_with_retry,
-    extract_relevant_sections,
-    build_writer_prompt,
-    ensure_radio_dialogue,
     log_error,
     log_workflow_step_start,
     log_workflow_step_end
 )
+# utils.py의 함수들은 직접 import (utils.py는 래퍼 역할)
+import importlib.util
+import sys
+from pathlib import Path
+
+# utils.py를 직접 import하기 위한 트릭
+utils_py_path = Path(__file__).parent.parent / "utils.py"
+if utils_py_path.exists():
+    # utils.py를 utils_module로 import
+    spec = importlib.util.spec_from_file_location("src.utils_module", utils_py_path)
+    utils_module = importlib.util.module_from_spec(spec)
+    sys.modules["src.utils_module"] = utils_module
+    spec.loader.exec_module(utils_module)
+    
+    get_gemini_model = utils_module.get_gemini_model
+    generate_content_with_retry = utils_module.generate_content_with_retry
+    extract_relevant_sections = utils_module.extract_relevant_sections
+    build_writer_prompt = utils_module.build_writer_prompt
+    ensure_radio_dialogue = utils_module.ensure_radio_dialogue
+else:
+    raise ImportError(f"Cannot find utils.py at {utils_py_path}")
 
 
 def writer_map_node(state: AgentState) -> AgentState:
