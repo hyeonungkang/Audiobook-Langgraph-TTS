@@ -62,8 +62,5 @@ except Exception as e:
     print(f"\n✗ Error: {e}", flush=True)
     import traceback
     traceback.print_exc()
-    try:
-        input("\nPress Enter to exit...")
-    except:
-        pass
+    # 에러 발생 시 자동 종료 (사용자 입력 대기 없음)
     sys.exit(1)

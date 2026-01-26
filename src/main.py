@@ -520,6 +520,9 @@ def main():
             title="🎉 완료",
             border_style="green"
         ))
+        # 완료 메시지를 3초간 표시한 후 자동 종료
+        console.print("\n[dim]30초 후 자동으로 종료됩니다...[/dim]")
+        time.sleep(30)
     else:
         print("\n" + "="*70, flush=True)
         print(f"✓ All tasks completed!", flush=True)
@@ -530,6 +533,9 @@ def main():
         if output_dir:
             print(f"  Output folder: {output_dir}", flush=True)
         print("="*70, flush=True)
+        # 완료 메시지를 3초간 표시한 후 자동 종료
+        print("\n30초 후 자동으로 종료됩니다...", flush=True)
+        time.sleep(30)
 
 
 if __name__ == "__main__":
@@ -550,9 +556,6 @@ if __name__ == "__main__":
         print("="*60, flush=True)
         import traceback
         traceback.print_exc()
-        try:
-            input("\nPress Enter to continue...")
-        except:
-            pass
+        # 에러 발생 시 자동 종료 (사용자 입력 대기 없음)
         raise
 
