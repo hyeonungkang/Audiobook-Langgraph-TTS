@@ -1899,12 +1899,20 @@ def build_writer_prompt(segment_info: dict, full_text: str, config: dict) -> str
         math_rule = "- 수식/기호가 나오면 표기 그대로 금지 → 구어체로 변환"
 
     boundary_rule = ""
-    if opening_line:
-        boundary_rule += f'- 첫 문장은 반드시 다음 문장으로 시작: "{opening_line}"\n'
-    if closing_line:
-        boundary_rule += f'- 마지막 문장은 반드시 다음 문장으로 끝: "{closing_line}"\n'
-    if not boundary_rule:
-        boundary_rule = "- opening_line/closing_line이 없으면 자연스럽게 시작/종료"
+    if language == "ko":
+        if opening_line:
+            boundary_rule += f'- 첫 문장 가이드: "{opening_line}" (중요: 제공된 문장의 호칭이나 말투가 현재 페르소나와 맞지 않을 경우, 핵심 의미는 유지하되 본인의 페르소나에 맞춰 자연스럽게 변주하세요. 예: "자기야" -> "{listener_name}님")\n'
+        if closing_line:
+            boundary_rule += f'- 마지막 문장 가이드: "{closing_line}" (중요: 제공된 문장의 말투가 현재 페르소나와 맞지 않을 경우, 핵심 메시지는 유지하되 본인의 페르소나에 맞춰 자연스럽게 다듬어서 마무리하세요.)\n'
+        if not boundary_rule:
+            boundary_rule = "- opening_line/closing_line이 없으면 자유롭게 시작/종료"
+    else:
+        if opening_line:
+            boundary_rule += f'- Opening line guide: "{opening_line}" (Note: If the address or tone of this line doesn\'t fit your current persona, adapt it naturally while keeping the core meaning.)\n'
+        if closing_line:
+            boundary_rule += f'- Closing line guide: "{closing_line}" (Note: Adapt the tone and expression of this closing line to naturally fit your current persona while preserving the core message.)\n'
+        if not boundary_rule:
+            boundary_rule = "- Start/end naturally if no specific opening/closing lines are provided"
 
     # Lover 모드 전용 지시사항
     lover_guidance = ""
@@ -2026,8 +2034,8 @@ Segment {segment_id}: {segment_title}
 **Note**: Use this original text as reference. Extract relevant information and convert it into a natural, conversational script. Do not copy verbatim - adapt and explain in your own words.
 
 ## ✅ Final Checklist Before Output
-- [ ] Script starts with the exact opening_line (if provided)
-- [ ] Script ends with the exact closing_line (if provided)
+- [ ] Script starts with a sentence that naturally reflects the opening_line (adapted to persona)
+- [ ] Script ends with a sentence that naturally reflects the closing_line (adapted to persona)
 - [ ] No LaTeX notation or mathematical symbols in raw form
 - [ ] No markdown, code blocks, or special formatting
 - [ ] Natural, conversational tone maintained throughout
