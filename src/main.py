@@ -362,8 +362,22 @@ def main():
         parsed_audio_metadata = None
         
         try:
-            # JSON 파싱 시도
-            parsed_data = json.loads(raw_text.strip())
+            # JSON 파싱 시도 (전처리: LaTeX 백슬래시 처리)
+            import re
+            def sanitize_json_input(text):
+                # Regex to capture valid JSON escapes in group 1, and other backslashes in group 2
+                # Valid: \" \\ \/ \b \f \n \r \t \uXXXX
+                pattern = r'(\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))|(\\)'
+                
+                def replace(match):
+                    if match.group(1):
+                        return match.group(1)
+                    return "\\\\"
+                
+                return re.sub(pattern, replace, text)
+
+            sanitized_text = sanitize_json_input(raw_text.strip())
+            parsed_data = json.loads(sanitized_text)
             
             # Case 1: showrunner JSON 형식 확인 ({"segments": [...], "audio_title": ...})
             if isinstance(parsed_data, dict) and "segments" in parsed_data:
