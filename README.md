@@ -279,6 +279,19 @@ export GOOGLE_API_KEY="your-api-key-here"
 - 등등...
 ```
 
+### 🚀 팁: Showrunner 단계 건너뛰기 (Google Gem 활용)
+
+Google Gem을 활용하여 PDF나 코드 자료 등을 파싱하고, 미리 완성된 Showrunner 기획안을 생성하여 `input.txt`에 넣으면 Showrunner 단계를 스킵하고 빠르게 오디오북을 생성할 수 있습니다.
+
+**🔗 Google Gem 링크:** [Audiobook Showrunner Gem](https://gemini.google.com/gem/91eaaf82d5ff?usp=sharing)
+
+**사용 방법:**
+1. 위 링크의 Google Gem에 접속합니다.
+2. PDF, 코드 파일, 또는 긴 텍스트를 업로드하거나 붙여넣습니다.
+3. Gem이 생성해준 Showrunner 기획안을 그대로 복사합니다.
+4. `input.txt` 파일에 붙여넣습니다.
+5. 프로그램을 실행하면 Showrunner 단계가 스킵되거나 빠르게 처리됩니다.
+
 ### 3️⃣ 프로그램 실행
 
 ```bash
