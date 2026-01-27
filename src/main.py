@@ -5,6 +5,8 @@ import sys
 import time
 import json
 from pathlib import Path
+import static_ffmpeg
+static_ffmpeg.add_paths()
 
 # #region agent log
 LOG_PATH = Path(__file__).parent.parent / ".cursor" / "debug.log"
